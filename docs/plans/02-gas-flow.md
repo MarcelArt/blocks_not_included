@@ -22,6 +22,7 @@ Gases spread into Vacuum, even out with neighbouring Cells of the same gas, sett
 5. **Displacement.** This rule covers every partial move into a Cell that holds a *different* gas, whenever rule 4 does not apply.
    - Gas X may move part of its Mass into a neighbouring Cell holding gas Y only if Y's entire contents can leave that Cell. Y leaves by merging into one of its own face neighbours that holds Y, or by moving into a neighbouring Vacuum Cell.
    - X can do this only from a Cell holding more Mass than the Y Cell it displaces, so pressure drives it.
+   - *(Added during implementation, approved by the human.)* After the move, X's Cell must also still hold more Mass than the Cell Y squeezed into. Without this, two gases whose pressures can't balance in whole Cells trade a Cell back and forth forever and never come to rest (ADR 0004).
    - Once Y has left, X fills the vacated Cell as if it were Vacuum.
    - If Y has nowhere to go, nothing moves.
    

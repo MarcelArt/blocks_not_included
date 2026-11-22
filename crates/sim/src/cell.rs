@@ -28,4 +28,8 @@ impl CellPos {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
     }
+
+    pub(crate) const fn offset(self, (dx, dy, dz): (i32, i32, i32)) -> Self {
+        Self::new(self.x + dx, self.y + dy, self.z + dz)
+    }
 }

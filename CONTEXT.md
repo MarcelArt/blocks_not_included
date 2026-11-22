@@ -34,6 +34,10 @@ _Avoid_: weight, heaviness
 One Element becoming a different Element when its temperature crosses a threshold that Element defines, e.g. Water above 100 °C becomes Steam. An Element that defines no threshold never transitions.
 _Avoid_: state change, phase change
 
+**Displacement**:
+A gas or liquid moving part of its Mass into a neighbouring Cell of a different gas, once that gas has left entirely for one of its own neighbours holding the same gas, or for Vacuum. It happens only from a Cell holding more Mass, and never when the displaced gas has nowhere to go.
+_Avoid_: pushing aside, shoving
+
 ### World
 
 **Chunk**:

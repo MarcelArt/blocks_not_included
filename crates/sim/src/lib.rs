@@ -5,6 +5,7 @@
 mod cell;
 mod chunk;
 mod element;
+mod gas;
 mod heat;
 mod simulation;
 
