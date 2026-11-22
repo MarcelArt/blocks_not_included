@@ -67,7 +67,7 @@ impl Side {
         }
     }
 
-    fn of(self, element: &Element) -> Option<&Transition> {
+    pub(crate) fn of(self, element: &Element) -> Option<&Transition> {
         match self {
             Side::Low => element.low.as_ref(),
             Side::High => element.high.as_ref(),
@@ -89,7 +89,7 @@ impl Side {
 
     /// Whether a temperature lies past a threshold on this side: below it for `low`, above it
     /// for `high`. NaN is past nothing.
-    fn is_past(self, temperature_k: f32, threshold_k: f32) -> bool {
+    pub(crate) fn is_past(self, temperature_k: f32, threshold_k: f32) -> bool {
         match self {
             Side::Low => temperature_k < threshold_k,
             Side::High => temperature_k > threshold_k,

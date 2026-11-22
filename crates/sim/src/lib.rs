@@ -9,6 +9,7 @@ mod element;
 mod gas;
 mod heat;
 mod liquid;
+mod phase_transition;
 mod simulation;
 mod transfer;
 

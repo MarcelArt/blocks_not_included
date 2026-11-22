@@ -31,7 +31,7 @@ At the end of each Tick, Cells whose temperature has crossed their Element's thr
 
 ## Done when
 
-- [ ] All eight tests exist and pass, and all earlier tests still pass.
+- [x] All eight tests exist and pass, and all earlier tests still pass.
 
 ## Scope boundary
 

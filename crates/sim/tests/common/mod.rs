@@ -111,6 +111,8 @@ pub struct Invariants {
     grams_by_element: HashMap<ElementId, u64>,
     /// The most grams one Cell of each listed liquid may hold.
     capacities: Vec<(ElementId, u32)>,
+    /// Whether the Mass of each Element, not just the total, must stay the same.
+    per_element: bool,
 }
 
 impl Invariants {
@@ -120,7 +122,14 @@ impl Invariants {
             grams_by_element: grams_by_element(sim, &cells),
             cells,
             capacities: Vec::new(),
+            per_element: true,
         }
+    }
+
+    /// Checks only total Mass, since a Phase Transition turns one Element's Mass into another's.
+    pub fn allowing_phase_transitions(mut self) -> Self {
+        self.per_element = false;
+        self
     }
 
     /// Also checks that no Cell of `liquid` ever holds more than `grams`.
@@ -155,11 +164,13 @@ impl Invariants {
             self.total_grams,
             "tick {tick}: total Mass changed"
         );
-        assert_eq!(
-            grams_by_element(sim, &self.cells),
-            self.grams_by_element,
-            "tick {tick}: Mass per Element changed"
-        );
+        if self.per_element {
+            assert_eq!(
+                grams_by_element(sim, &self.cells),
+                self.grams_by_element,
+                "tick {tick}: Mass per Element changed"
+            );
+        }
     }
 }
 

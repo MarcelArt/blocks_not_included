@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::cell::{Cell, CellPos};
 use crate::chunk::{Chunk, ChunkPos, cell_at, set_cell};
 use crate::element::ElementTable;
-use crate::{gas, heat, liquid};
+use crate::{gas, heat, liquid, phase_transition};
 
 /// Simulated time covered by one Tick.
 pub(crate) const TICK_SECONDS: f32 = 0.2;
@@ -42,11 +42,12 @@ impl Simulation {
             .sum()
     }
 
-    /// Advances the simulation by one Tick.
+    /// Advances the simulation by one Tick: heat, then gas, then liquid, then Phase Transitions.
     pub fn tick(&mut self) {
         heat::conduct(&mut self.chunks, &self.elements);
         gas::flow(&mut self.chunks, &self.elements, self.ticks);
         liquid::flow(&mut self.chunks, &self.elements, self.ticks);
+        phase_transition::transform(&mut self.chunks, &self.elements);
         self.ticks += 1;
     }
 }
