@@ -1,0 +1,100 @@
+// Every Element the simulation knows about, except Vacuum, which is built in.
+//
+// Units: density kg/m³, specific_heat J/(g·K), conductivity W/(m·K), temperature_k kelvin.
+// Colours are linear RGB. Below `low.temperature_k` an Element becomes `low.into`; above
+// `high.temperature_k` it becomes `high.into`. Leave a gap between a pair of opposite thresholds
+// (e.g. Water boils at 373.15 K, Steam condenses at 372.15 K) so Cells don't flip every Tick.
+//
+// Order matters: a Cell stores its Element by position in this list, so append new Elements at
+// the end rather than inserting, reordering or renaming.
+(
+    elements: [
+        (
+            name: "Oxygen",
+            phase: Gas,
+            color: (0.75, 0.85, 1.0),
+            density: 1.43,
+            specific_heat: 1.005,
+            conductivity: 0.024,
+        ),
+        (
+            name: "Carbon Dioxide",
+            phase: Gas,
+            color: (0.45, 0.45, 0.45),
+            density: 1.98,
+            specific_heat: 0.846,
+            conductivity: 0.0146,
+        ),
+        (
+            name: "Hydrogen",
+            phase: Gas,
+            color: (1.0, 0.75, 0.85),
+            density: 0.0899,
+            specific_heat: 14.3,
+            conductivity: 0.18,
+        ),
+        (
+            name: "Steam",
+            phase: Gas,
+            color: (0.95, 0.95, 0.95),
+            density: 0.6,
+            specific_heat: 2.08,
+            conductivity: 0.025,
+            low: Some((temperature_k: 372.15, into: "Water")),
+        ),
+        (
+            name: "Water",
+            phase: Liquid,
+            color: (0.15, 0.35, 0.8),
+            density: 1000.0,
+            specific_heat: 4.179,
+            conductivity: 0.609,
+            low: Some((temperature_k: 272.15, into: "Ice")),
+            high: Some((temperature_k: 373.15, into: "Steam")),
+        ),
+        (
+            name: "Magma",
+            phase: Liquid,
+            color: (1.0, 0.35, 0.05),
+            density: 2600.0,
+            specific_heat: 1.0,
+            conductivity: 1.0,
+            low: Some((temperature_k: 1400.0, into: "Igneous Rock")),
+        ),
+        (
+            name: "Ice",
+            phase: Solid,
+            color: (0.75, 0.9, 1.0),
+            density: 917.0,
+            specific_heat: 2.05,
+            conductivity: 2.18,
+            high: Some((temperature_k: 273.15, into: "Water")),
+        ),
+        (
+            name: "Granite",
+            phase: Solid,
+            color: (0.55, 0.5, 0.5),
+            density: 2700.0,
+            specific_heat: 0.79,
+            conductivity: 2.8,
+            high: Some((temperature_k: 1500.0, into: "Magma")),
+        ),
+        (
+            name: "Dirt",
+            phase: Solid,
+            color: (0.45, 0.3, 0.18),
+            density: 1500.0,
+            specific_heat: 0.8,
+            conductivity: 0.5,
+        ),
+        (
+            name: "Igneous Rock",
+            phase: Solid,
+            color: (0.25, 0.22, 0.22),
+            density: 2900.0,
+            specific_heat: 1.0,
+            conductivity: 2.0,
+            high: Some((temperature_k: 1500.0, into: "Magma")),
+        ),
+    ],
+)

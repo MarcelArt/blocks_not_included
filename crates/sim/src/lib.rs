@@ -9,5 +9,5 @@ mod heat;
 mod simulation;
 
 pub use cell::{Cell, CellPos};
-pub use element::{Element, ElementId, ElementTable};
+pub use element::{Element, ElementError, ElementId, ElementTable, Phase, Side, Transition};
 pub use simulation::Simulation;

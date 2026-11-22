@@ -5,3 +5,5 @@ edition = "2024"
 
 # This crate must never depend on Bevy (see docs/adr/0003-bevy-free-background-sim.md).
 [dependencies]
+ron = "0.12.3"
+serde = { version = "1.0.229", features = ["derive"] }
