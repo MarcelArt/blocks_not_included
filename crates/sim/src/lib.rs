@@ -8,6 +8,7 @@ mod displacement;
 mod edit;
 mod element;
 mod gas;
+mod grid;
 mod heat;
 mod liquid;
 mod phase_transition;

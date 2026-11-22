@@ -8,3 +8,10 @@ edition = "2024"
 # `f64` takes noise coordinates as f64, so the terrain keeps its detail far from the origin.
 fastnoise-lite = { version = "1.1.1", features = ["f64"] }
 sim = { path = "../sim" }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "tick"
+harness = false

@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use crate::cell::Cell;
 use crate::chunk::{ActiveChunks, ChunkPos};
 use crate::settings::SimSettings;
@@ -21,19 +23,20 @@ pub(crate) struct TickStart {
 impl TickStart {
     /// Records the awake Chunks and forgets which Chunks were touched before this Tick.
     pub fn record(chunks: &mut ActiveChunks, settings: &SimSettings) -> Self {
-        let mut awake = HashMap::new();
-        for (&pos, chunk) in chunks.iter_mut() {
-            chunk.touched = false;
-            if settings.settled_chunks_enabled && !chunk.settled {
-                awake.insert(pos, chunk.cells.clone());
-            }
-        }
+        let awake = chunks
+            .par_iter_mut()
+            .filter_map(|(&pos, chunk)| {
+                chunk.touched = false;
+                (settings.settled_chunks_enabled && !chunk.settled)
+                    .then(|| (pos, chunk.cells.clone()))
+            })
+            .collect();
         Self { awake }
     }
 
     /// Decides which Chunks are Settled for the next Tick.
     pub fn settle(self, chunks: &mut ActiveChunks, settings: &SimSettings) {
-        for (pos, chunk) in chunks.iter_mut() {
+        chunks.par_iter_mut().for_each(|(pos, chunk)| {
             chunk.settled = if !settings.settled_chunks_enabled {
                 false
             } else if let Some(start) = self.awake.get(pos) {
@@ -43,7 +46,7 @@ impl TickStart {
                 // during the Tick is awake.
                 chunk.settled && !chunk.touched
             };
-        }
+        });
     }
 }
 

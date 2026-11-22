@@ -50,14 +50,15 @@
 //! added up, leaving sloped mounds (an amendment to rule 4, approved by the human).
 
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{ActiveChunks, cell_at};
+use crate::chunk::ActiveChunks;
 use crate::displacement::displace;
 use crate::element::{ElementId, ElementTable, Phase};
 use crate::gas::is_gas;
+use crate::grid::{Cells, Grid};
 use crate::settings::SimSettings;
 use crate::transfer::{
-    DOWN, FACES, SIDEWAYS, TieBreak, Transfer, apply, cells_where, pick, settle_vacuum_claims,
-    share, swap_layers,
+    DOWN, FACES, SIDEWAYS, TieBreak, Transfer, apply, apply_batches, pick, settle_vacuum_claims,
+    share, split_off_vacuum_claims, swap_layers,
 };
 
 /// Moves liquid Mass for one Tick.
@@ -68,7 +69,11 @@ pub(crate) fn flow(
     settings: &SimSettings,
 ) {
     shed(chunks, elements, tick);
-    swap_layers(chunks, |above, below| sinks_through(above, below, elements));
+    swap_layers(
+        chunks,
+        |below| is_gas(below, elements) || is_liquid(below, elements),
+        |above, below| sinks_through(above, below, elements),
+    );
     fall(chunks, elements);
     displace_gas(chunks, elements, settings, tick);
     spread(chunks, elements, settings, tick);
@@ -79,36 +84,35 @@ pub(crate) fn flow(
 /// into Cells of the same liquid with room. A Cell with no such neighbour stays over capacity,
 /// because compression is not modelled.
 fn shed(chunks: &mut ActiveChunks, elements: &ElementTable, tick: u64) {
-    let over_capacity = |chunks: &ActiveChunks| {
-        cells_where(chunks, |cell| {
-            is_liquid(cell, elements) && cell.mass_grams > capacity(cell.element, elements)
+    let over_capacity = |cell: Cell| {
+        is_liquid(cell, elements) && cell.mass_grams > capacity(cell.element, elements)
+    };
+    let pushes = {
+        let grid = Grid::new(chunks);
+        grid.plan(over_capacity, |cells, from, source, pushes| {
+            for push in shedding_offers(cells, elements, tick, from, Shedding::IntoGasToo) {
+                let target = cells.cell(push.to);
+                // Displacement only ever pushes from the Cell holding more Mass.
+                if is_gas(target, elements) && source.mass_grams > target.mass_grams {
+                    pushes.push(push);
+                }
+            }
         })
     };
-    let pushes = over_capacity(chunks)
-        .into_iter()
-        .flat_map(|from| shedding_offers(chunks, elements, tick, from, Shedding::IntoGasToo))
-        .filter(|push| {
-            let target = cell_at(chunks, push.to);
-            // Displacement only ever pushes from the Cell holding more Mass.
-            is_gas(target, elements) && cell_at(chunks, push.from).mass_grams > target.mass_grams
-        })
-        .collect();
     displace(chunks, tick, pushes);
 
-    let mut transfers = Vec::new();
-    let mut into_vacuum = Vec::new();
-    for offer in over_capacity(chunks)
-        .into_iter()
-        .flat_map(|from| shedding_offers(chunks, elements, tick, from, Shedding::NotIntoGas))
-    {
-        if cell_at(chunks, offer.to).element == ElementId::VACUUM {
-            into_vacuum.push(offer);
-        } else {
-            transfers.push(offer);
-        }
-    }
-    transfers.extend(settle_vacuum_claims(into_vacuum, tick));
-    apply(chunks, transfers);
+    let planned = {
+        let grid = Grid::new(chunks);
+        grid.plan_by_chunk(over_capacity, |cells, from, _, planned| {
+            for offer in shedding_offers(cells, elements, tick, from, Shedding::NotIntoGas) {
+                let into_vacuum = cells.cell(offer.to).element == ElementId::VACUUM;
+                planned.push((offer, into_vacuum));
+            }
+        })
+    };
+    let (mut transfers, into_vacuum) = split_off_vacuum_claims(planned);
+    transfers.push(settle_vacuum_claims(into_vacuum, tick));
+    apply_batches(chunks, transfers);
 }
 
 /// Which neighbours an over-capacity Cell is shedding into.
@@ -130,20 +134,20 @@ enum Shedding {
 /// neighbour has the room of Vacuum, since once its gas has gone (Displacement) the liquid fills
 /// it as if it were Vacuum.
 fn shedding_offers(
-    chunks: &ActiveChunks,
+    cells: &impl Cells,
     elements: &ElementTable,
     tick: u64,
     from: CellPos,
     shedding: Shedding,
 ) -> Vec<Transfer> {
-    let source = cell_at(chunks, from);
+    let source = cells.cell(from);
     let capacity = capacity(source.element, elements);
     let excess = source.mass_grams - capacity;
     let open: Vec<(CellPos, u32)> = FACES
         .into_iter()
         .map(|face| from.offset(face))
         .filter_map(|to| {
-            let target = cell_at(chunks, to);
+            let target = cells.cell(to);
             let room = if shedding == Shedding::IntoGasToo && is_gas(target, elements) {
                 capacity
             } else {
@@ -161,7 +165,7 @@ fn shedding_offers(
     let mut offers = Vec::new();
     for (i, (to, room)) in open.into_iter().enumerate() {
         let extra = u32::from((i + count - first) % count < remainder);
-        let sharers = over_capacity_neighbours(chunks, elements, to, source.element);
+        let sharers = over_capacity_neighbours(cells, elements, to, source.element);
         let grams = (each + extra).min(room / sharers);
         if grams > 0 {
             offers.push(Transfer::new(from, source, to, grams));
@@ -172,7 +176,7 @@ fn shedding_offers(
 
 /// How many over-capacity Cells of `liquid` touch `pos`, counting at least one.
 fn over_capacity_neighbours(
-    chunks: &ActiveChunks,
+    cells: &impl Cells,
     elements: &ElementTable,
     pos: CellPos,
     liquid: ElementId,
@@ -180,7 +184,7 @@ fn over_capacity_neighbours(
     let capacity = capacity(liquid, elements);
     let count = FACES
         .into_iter()
-        .map(|face| cell_at(chunks, pos.offset(face)))
+        .map(|face| cells.cell(pos.offset(face)))
         .filter(|cell| cell.element == liquid && cell.mass_grams > capacity)
         .count();
     count.max(1) as u32
@@ -206,17 +210,21 @@ fn sinks_through(above: Cell, below: Cell, elements: &ElementTable) -> bool {
 /// Each Cell receives from the one Cell above it at most, and never more than its room, so no
 /// Cell ends up over capacity, even one that is also falling.
 fn fall(chunks: &mut ActiveChunks, elements: &ElementTable) {
-    let mut transfers = Vec::new();
-    for from in cells_where(chunks, |cell| is_liquid(cell, elements)) {
-        let source = cell_at(chunks, from);
-        let to = from.offset(DOWN);
-        let grams = source
-            .mass_grams
-            .min(room_for(source, cell_at(chunks, to), elements));
-        if grams > 0 {
-            transfers.push(Transfer::new(from, source, to, grams));
-        }
-    }
+    let transfers = {
+        let grid = Grid::new(chunks);
+        grid.plan(
+            |cell| is_liquid(cell, elements),
+            |cells, from, source, transfers| {
+                let to = from.offset(DOWN);
+                let grams = source
+                    .mass_grams
+                    .min(room_for(source, cells.cell(to), elements));
+                if grams > 0 {
+                    transfers.push(Transfer::new(from, source, to, grams));
+                }
+            },
+        )
+    };
     apply(chunks, transfers);
 }
 
@@ -228,11 +236,19 @@ fn displace_gas(
     settings: &SimSettings,
     tick: u64,
 ) {
-    let pushes = cells_where(chunks, |cell| is_liquid(cell, elements))
-        .into_iter()
-        .flat_map(|from| spreading_offers(chunks, elements, settings, from))
-        .filter(|offer| is_gas(cell_at(chunks, offer.to), elements))
-        .collect();
+    let pushes = {
+        let grid = Grid::new(chunks);
+        grid.plan(
+            |cell| is_liquid(cell, elements),
+            |cells, from, _, pushes| {
+                pushes.extend(
+                    spreading_offers(cells, elements, settings, from)
+                        .into_iter()
+                        .filter(|offer| is_gas(cells.cell(offer.to), elements)),
+                );
+            },
+        )
+    };
     displace(chunks, tick, pushes);
 }
 
@@ -242,20 +258,25 @@ fn displace_gas(
 /// A Vacuum Cell becomes only one Element per Tick: when different liquids reach it at once, the
 /// one offering the most grams wins, and the others' offers are withdrawn.
 fn spread(chunks: &mut ActiveChunks, elements: &ElementTable, settings: &SimSettings, tick: u64) {
-    let mut transfers = Vec::new();
-    let mut into_vacuum = Vec::new();
-    for from in cells_where(chunks, |cell| is_liquid(cell, elements)) {
-        for offer in spreading_offers(chunks, elements, settings, from) {
-            let target = cell_at(chunks, offer.to);
-            if target.element == ElementId::VACUUM {
-                into_vacuum.push(offer);
-            } else if target.element == offer.element {
-                transfers.push(offer);
-            }
-        }
-    }
-    transfers.extend(settle_vacuum_claims(into_vacuum, tick));
-    apply(chunks, transfers);
+    let planned = {
+        let grid = Grid::new(chunks);
+        grid.plan_by_chunk(
+            |cell| is_liquid(cell, elements),
+            |cells, from, _, planned| {
+                for offer in spreading_offers(cells, elements, settings, from) {
+                    let target = cells.cell(offer.to);
+                    if target.element == ElementId::VACUUM {
+                        planned.push((offer, true));
+                    } else if target.element == offer.element {
+                        planned.push((offer, false));
+                    }
+                }
+            },
+        )
+    };
+    let (mut transfers, into_vacuum) = split_off_vacuum_claims(planned);
+    transfers.push(settle_vacuum_claims(into_vacuum, tick));
+    apply_batches(chunks, transfers);
 }
 
 /// Everything the liquid Cell at `from` would move sideways this Tick, if it can't fall and isn't
@@ -268,21 +289,21 @@ fn spread(chunks: &mut ActiveChunks, elements: &ElementTable, settings: &SimSett
 ///   thinning out forever. A gas neighbour is offered what Vacuum would be, since once its gas has
 ///   gone (Displacement) the liquid fills it as if it were Vacuum.
 fn spreading_offers(
-    chunks: &ActiveChunks,
+    cells: &impl Cells,
     elements: &ElementTable,
     settings: &SimSettings,
     from: CellPos,
 ) -> Vec<Transfer> {
-    let source = cell_at(chunks, from);
+    let source = cells.cell(from);
     let capacity = capacity(source.element, elements);
-    if source.mass_grams > capacity || can_fall(chunks, elements, from) {
+    if source.mass_grams > capacity || can_fall(cells, elements, from) {
         return Vec::new();
     }
     let threshold = (f64::from(capacity) * settings.liquid_spreading_threshold) as u64;
     let mut offers = Vec::new();
     for face in SIDEWAYS {
         let to = from.offset(face);
-        let target = cell_at(chunks, to);
+        let target = cells.cell(to);
         let advances = matches!(
             elements.get(target.element).phase,
             Phase::Vacuum | Phase::Gas
@@ -296,7 +317,7 @@ fn spreading_offers(
         } else {
             continue;
         };
-        let faces = sideways_faces(chunks, elements, from, to);
+        let faces = sideways_faces(cells, elements, from, to);
         let grams = share(
             source.mass_grams,
             fills_from,
@@ -311,8 +332,8 @@ fn spreading_offers(
 }
 
 /// Whether the liquid Cell at `pos` can fall: into the Cell below it, or through it.
-fn can_fall(chunks: &ActiveChunks, elements: &ElementTable, pos: CellPos) -> bool {
-    let (cell, below) = (cell_at(chunks, pos), cell_at(chunks, pos.offset(DOWN)));
+fn can_fall(cells: &impl Cells, elements: &ElementTable, pos: CellPos) -> bool {
+    let (cell, below) = (cells.cell(pos), cells.cell(pos.offset(DOWN)));
     room_for(cell, below, elements) > 0 || sinks_through(cell, below, elements)
 }
 
@@ -320,15 +341,12 @@ fn can_fall(chunks: &ActiveChunks, elements: &ElementTable, pos: CellPos) -> boo
 ///
 /// Dividing each face's flow by this keeps every Cell's new Mass a blend of its neighbours' old
 /// Mass, however many faces flow at once, so nothing overshoots.
-fn sideways_faces(chunks: &ActiveChunks, elements: &ElementTable, a: CellPos, b: CellPos) -> u32 {
+fn sideways_faces(cells: &impl Cells, elements: &ElementTable, a: CellPos, b: CellPos) -> u32 {
     let open = |pos: CellPos| {
         SIDEWAYS
             .into_iter()
             .filter(|&face| {
-                elements
-                    .get(cell_at(chunks, pos.offset(face)).element)
-                    .phase
-                    != Phase::Solid
+                elements.get(cells.cell(pos.offset(face)).element).phase != Phase::Solid
             })
             .count() as u32
     };

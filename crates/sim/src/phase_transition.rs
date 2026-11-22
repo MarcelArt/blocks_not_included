@@ -16,6 +16,8 @@
 //! A Cell that becomes a liquid may now hold more than the liquid's capacity. Liquid flow sheds
 //! the excess on later Ticks (rule 5, and rule 1 of `docs/plans/03-liquid-flow.md`).
 
+use rayon::prelude::*;
+
 use crate::cell::Cell;
 use crate::chunk::ActiveChunks;
 use crate::element::{ElementId, ElementTable, Side};
@@ -26,14 +28,18 @@ use crate::element::{ElementId, ElementTable, Side};
 /// this Tick, which wakes them.
 pub(crate) fn transform(chunks: &mut ActiveChunks, elements: &ElementTable) {
     let thresholds = Thresholds::resolve(elements);
-    for chunk in chunks.values_mut().filter(|chunk| chunk.is_awake()) {
-        for index in 0..chunk.cells.len() {
-            let cell = chunk.cells[index];
-            if let Some(element) = thresholds.crossed(cell.element, cell.temperature_k) {
-                chunk.write(index, Cell { element, ..cell });
+    // Every Cell transitions on its own, so the Chunks can be worked through in any order.
+    chunks
+        .par_iter_mut()
+        .filter(|(_, chunk)| chunk.is_awake())
+        .for_each(|(_, chunk)| {
+            for index in 0..chunk.cells.len() {
+                let cell = chunk.cells[index];
+                if let Some(element) = thresholds.crossed(cell.element, cell.temperature_k) {
+                    chunk.write(index, Cell { element, ..cell });
+                }
             }
-        }
-    }
+        });
 }
 
 /// One side of an Element's Phase Transitions, with its target looked up by name.

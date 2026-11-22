@@ -3,7 +3,6 @@ use std::ops::{Deref, DerefMut};
 
 use crate::cell::{Cell, CellPos};
 use crate::region::ActiveRegion;
-use crate::transfer::FACES;
 
 /// How many Cells wide a Chunk is along each axis.
 pub const CHUNK_SIZE: usize = 32;
@@ -54,50 +53,6 @@ impl ChunkPos {
     }
 }
 
-/// The index of every Cell of the Settled Chunk at `pos` that shares a face with a Cell of an
-/// awake Chunk. Phenomena visit these as well as every Cell of an awake Chunk, because borders
-/// between awake and Settled Chunks are still processed.
-pub(crate) fn cells_facing_awake(chunks: &HashMap<ChunkPos, Chunk>, pos: ChunkPos) -> Vec<usize> {
-    let mut cells: Vec<usize> = FACES
-        .into_iter()
-        .filter(|&face| is_awake(chunks, pos.offset(face)))
-        .flat_map(face_layer)
-        .collect();
-    // A Cell on an edge or corner can lie on two awake faces.
-    cells.sort_unstable();
-    cells.dedup();
-    cells
-}
-
-/// Whether the Chunk at `pos` exists and is awake.
-pub(crate) fn is_awake(chunks: &HashMap<ChunkPos, Chunk>, pos: ChunkPos) -> bool {
-    chunks.get(&pos).is_some_and(Chunk::is_awake)
-}
-
-/// Whether the Chunk at `pos` shares a face with an awake Chunk.
-pub(crate) fn faces_awake(chunks: &HashMap<ChunkPos, Chunk>, pos: ChunkPos) -> bool {
-    FACES
-        .into_iter()
-        .any(|face| is_awake(chunks, pos.offset(face)))
-}
-
-/// The index of every Cell in the layer of a Chunk that touches the neighbour in direction `face`.
-fn face_layer(face: (i32, i32, i32)) -> impl Iterator<Item = usize> {
-    let last = CHUNK_SIZE - 1;
-    (0..CHUNK_SIZE).flat_map(move |u| {
-        (0..CHUNK_SIZE).map(move |v| {
-            index(match face {
-                (1, 0, 0) => (last, u, v),
-                (-1, 0, 0) => (0, u, v),
-                (0, 1, 0) => (u, last, v),
-                (0, -1, 0) => (u, 0, v),
-                (0, 0, 1) => (u, v, last),
-                _ => (u, v, 0),
-            })
-        })
-    })
-}
-
 /// The Chunks that every phenomenon works on: the stored Chunks of the Active Region. It
 /// dereferences to the map of those Chunks.
 ///
@@ -133,46 +88,26 @@ impl DerefMut for ActiveChunks {
     }
 }
 
-/// The Cell at `pos`: Vacuum in a Chunk of the Active Region that isn't stored, and
-/// [`Cell::SEALED_EDGE`] outside the Active Region.
-pub(crate) fn cell_at(chunks: &ActiveChunks, pos: CellPos) -> Cell {
-    let (chunk, index) = locate(pos);
-    match chunks.get(&chunk) {
-        Some(chunk) => chunk.cells[index],
-        None if chunks.region.contains(chunk) => Cell::VACUUM,
-        None => Cell::SEALED_EDGE,
-    }
-}
-
-/// Overwrites the Cell at `pos`, which must lie in the Active Region, storing its Chunk if needed,
-/// and marks the Chunk touched if the Cell changed.
-pub(crate) fn set_cell(chunks: &mut ActiveChunks, pos: CellPos, cell: Cell) {
-    let (chunk, index) = locate(pos);
-    debug_assert!(
-        chunks.region.contains(chunk),
-        "{pos:?} lies beyond the Active Region's sealed edge"
-    );
-    chunks
-        .entry(chunk)
-        .or_insert_with(Chunk::new)
-        .write(index, cell);
-}
-
 /// Splits a world position into the Chunk containing it and the Cell's index within that Chunk.
 pub(crate) fn locate(pos: CellPos) -> (ChunkPos, usize) {
-    let size = CHUNK_SIZE as i32;
+    // CHUNK_SIZE is a power of two, so an arithmetic shift is the Euclidean division, and the
+    // mask is the remainder, for negative positions too.
+    const SHIFT: u32 = CHUNK_SIZE.trailing_zeros();
+    const MASK: i32 = CHUNK_SIZE as i32 - 1;
     let chunk = ChunkPos {
-        x: pos.x.div_euclid(size),
-        y: pos.y.div_euclid(size),
-        z: pos.z.div_euclid(size),
+        x: pos.x >> SHIFT,
+        y: pos.y >> SHIFT,
+        z: pos.z >> SHIFT,
     };
     let local = (
-        pos.x.rem_euclid(size) as usize,
-        pos.y.rem_euclid(size) as usize,
-        pos.z.rem_euclid(size) as usize,
+        (pos.x & MASK) as usize,
+        (pos.y & MASK) as usize,
+        (pos.z & MASK) as usize,
     );
     (chunk, index(local))
 }
+
+const _: () = assert!(CHUNK_SIZE.is_power_of_two());
 
 pub(crate) fn index((x, y, z): (usize, usize, usize)) -> usize {
     (y * CHUNK_SIZE + z) * CHUNK_SIZE + x

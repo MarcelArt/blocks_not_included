@@ -35,14 +35,18 @@
 //! it never empties. Flows are truncated to whole grams, which
 //! is how gas comes to rest (ADR 0004).
 
+use rayon::prelude::*;
+
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{ActiveChunks, CHUNK_SIZE, cell_at, index};
+use crate::chunk::{ActiveChunks, CHUNK_SIZE, index};
 use crate::displacement::displace;
 use crate::element::{ElementId, ElementTable, Phase};
+use crate::grid::{Cells, Grid, Layout, chunks_mut};
 use crate::region::top_chunk_y;
 use crate::settings::SimSettings;
 use crate::transfer::{
-    FACES, Transfer, UP, apply, cells_where, settle_vacuum_claims, share, swap_layers,
+    FACES, Transfer, UP, apply_batches, settle_vacuum_claims, share, split_off_vacuum_claims,
+    swap_layers,
 };
 
 /// Moves gas Mass for one Tick.
@@ -54,12 +58,21 @@ pub(crate) fn flow(
 ) {
     let fraction = settings.gas_evening_out_fraction;
     // Rule 4: a gas Cell directly above a different, less dense gas swaps places with it.
-    swap_layers(chunks, |above, below| sinks_through(above, below, elements));
+    swap_layers(
+        chunks,
+        |below| is_gas(below, elements),
+        |above, below| sinks_through(above, below, elements),
+    );
     // Rule 5: Displacement.
-    let pushes = gas_cells(chunks, elements)
-        .into_iter()
-        .flat_map(|target| pushes_into(chunks, elements, fraction, target))
-        .collect();
+    let pushes = {
+        let grid = Grid::new(chunks);
+        grid.plan(
+            |cell| is_gas(cell, elements),
+            |cells, target, held, pushes| {
+                pushes_into(cells, elements, fraction, target, held, pushes);
+            },
+        )
+    };
     displace(chunks, tick, pushes);
     spread(chunks, elements, fraction, tick);
 }
@@ -76,33 +89,37 @@ pub(crate) fn escape_to_space(
     fraction: f64,
 ) -> u64 {
     let top = CHUNK_SIZE - 1;
-    let mut escaped = 0;
-    for (_, chunk) in chunks
-        .iter_mut()
-        .filter(|(pos, chunk)| pos.y == top_chunk_y() && chunk.is_awake())
-    {
-        for (x, z) in (0..CHUNK_SIZE).flat_map(|x| (0..CHUNK_SIZE).map(move |z| (x, z))) {
-            let index = index((x, top, z));
-            let cell = chunk.cells[index];
-            // Truncation rounds any loss below 1 g to zero (ADR 0004).
-            let grams = (f64::from(cell.mass_grams) * fraction) as u32;
-            if grams == 0 || !is_gas(cell, elements) {
-                continue;
-            }
-            escaped += u64::from(grams);
-            let left = cell.mass_grams - grams;
-            let cell = if left == 0 {
-                Cell::VACUUM
-            } else {
-                Cell {
-                    mass_grams: left,
-                    ..cell
+    let layout = Layout::new(chunks);
+    let in_top_layer = |slot: &usize| layout.key(*slot).y == top_chunk_y();
+    chunks_mut(chunks, &layout)
+        .into_par_iter()
+        .enumerate()
+        .filter(|(slot, chunk)| in_top_layer(slot) && chunk.is_awake())
+        .map(|(_, chunk)| {
+            let mut escaped = 0;
+            for (x, z) in (0..CHUNK_SIZE).flat_map(|x| (0..CHUNK_SIZE).map(move |z| (x, z))) {
+                let index = index((x, top, z));
+                let cell = chunk.cells[index];
+                // Truncation rounds any loss below 1 g to zero (ADR 0004).
+                let grams = (f64::from(cell.mass_grams) * fraction) as u32;
+                if grams == 0 || !is_gas(cell, elements) {
+                    continue;
                 }
-            };
-            chunk.write(index, cell);
-        }
-    }
-    escaped
+                escaped += u64::from(grams);
+                let left = cell.mass_grams - grams;
+                let cell = if left == 0 {
+                    Cell::VACUUM
+                } else {
+                    Cell {
+                        mass_grams: left,
+                        ..cell
+                    }
+                };
+                chunk.write(index, cell);
+            }
+            escaped
+        })
+        .sum()
 }
 
 /// Whether gas `above` sinks through gas `below`: they are different gases, and `above` is
@@ -114,38 +131,37 @@ fn sinks_through(above: Cell, below: Cell, elements: &ElementTable) -> bool {
         && elements.get(above.element).density > elements.get(below.element).density
 }
 
-/// Every push a different gas could make into `target`: from a neighbour holding more Mass,
-/// moving what it would move if `target` were Vacuum. Pairs that layering (rule 4) decides are
-/// left out.
+/// Every push a different gas could make into `target`, which holds `held`: from a neighbour
+/// holding more Mass, moving what it would move if `target` were Vacuum. Pairs that layering
+/// (rule 4) decides are left out.
 fn pushes_into(
-    chunks: &ActiveChunks,
+    cells: &impl Cells,
     elements: &ElementTable,
     fraction: f64,
     target: CellPos,
-) -> Vec<Transfer> {
-    let held = cell_at(chunks, target);
-    let mut pushes = Vec::new();
+    held: Cell,
+    pushes: &mut Vec<Transfer>,
+) {
     for face in FACES {
         let from = target.offset(face);
-        let source = cell_at(chunks, from);
-        if !is_gas(source, elements)
-            || source.element == held.element
+        let source = cells.cell(from);
+        if source.element == held.element
             || source.mass_grams <= held.mass_grams
-            || layers(chunks, elements, from, target)
+            || !is_gas(source, elements)
+            || layers(cells, elements, from, target)
         {
             continue;
         }
-        let faces = face_count(chunks, elements, from, target);
+        let faces = open_faces(cells, elements, from).max(open_faces(cells, elements, target));
         let grams = share(source.mass_grams, 0, faces, fraction);
         if grams > 0 {
             pushes.push(Transfer::new(from, source, target, grams));
         }
     }
-    pushes
 }
 
 /// Whether rule 4 governs the touching Cells `a` and `b`.
-fn layers(chunks: &ActiveChunks, elements: &ElementTable, a: CellPos, b: CellPos) -> bool {
+fn layers(cells: &impl Cells, elements: &ElementTable, a: CellPos, b: CellPos) -> bool {
     let (lower, upper) = if b == a.offset(UP) {
         (a, b)
     } else if a == b.offset(UP) {
@@ -153,7 +169,7 @@ fn layers(chunks: &ActiveChunks, elements: &ElementTable, a: CellPos, b: CellPos
     } else {
         return false;
     };
-    sinks_through(cell_at(chunks, upper), cell_at(chunks, lower), elements)
+    sinks_through(cells.cell(upper), cells.cell(lower), elements)
 }
 
 /// Rules 2 and 3: every gas Cell moves part of its Mass into each Vacuum face neighbour, and
@@ -162,43 +178,48 @@ fn layers(chunks: &ActiveChunks, elements: &ElementTable, a: CellPos, b: CellPos
 /// A Vacuum Cell becomes only one Element per Tick: when different gases reach it at once, the
 /// one offering the most grams wins, and the others' offers are withdrawn.
 fn spread(chunks: &mut ActiveChunks, elements: &ElementTable, fraction: f64, tick: u64) {
-    let mut transfers = Vec::new();
-    let mut into_vacuum = Vec::new();
-    for from in gas_cells(chunks, elements) {
-        let source = cell_at(chunks, from);
-        for face in FACES {
-            let to = from.offset(face);
-            let target = cell_at(chunks, to);
-            if target.element != ElementId::VACUUM && target.element != source.element {
-                continue;
-            }
-            let faces = face_count(chunks, elements, from, to);
-            let grams = share(source.mass_grams, target.mass_grams, faces, fraction);
-            if grams == 0 {
-                continue;
-            }
-            let transfer = Transfer::new(from, source, to, grams);
-            if target.element == ElementId::VACUUM {
-                into_vacuum.push(transfer);
-            } else {
-                transfers.push(transfer);
-            }
-        }
-    }
-    transfers.extend(settle_vacuum_claims(into_vacuum, tick));
-    apply(chunks, transfers);
-}
-
-/// The larger open-face count of two touching Cells.
-fn face_count(chunks: &ActiveChunks, elements: &ElementTable, a: CellPos, b: CellPos) -> u32 {
-    open_faces(chunks, elements, a).max(open_faces(chunks, elements, b))
+    let planned = {
+        let grid = Grid::new(chunks);
+        grid.plan_by_chunk(
+            |cell| is_gas(cell, elements),
+            |cells, from, source, planned| {
+                // The larger open-face count of two touching Cells divides each face's flow. The
+                // source's own count is the same for every face, so it is counted once, and
+                // only if something might move.
+                let mut open_here = None;
+                for face in FACES {
+                    let to = from.offset(face);
+                    let target = cells.cell(to);
+                    if target.element != ElementId::VACUUM && target.element != source.element {
+                        continue;
+                    }
+                    // Nothing moves toward a Cell holding as much or more, whatever the face
+                    // count.
+                    if source.mass_grams <= target.mass_grams {
+                        continue;
+                    }
+                    let open_here =
+                        *open_here.get_or_insert_with(|| open_faces(cells, elements, from));
+                    let faces = open_here.max(open_faces(cells, elements, to));
+                    let grams = share(source.mass_grams, target.mass_grams, faces, fraction);
+                    if grams > 0 {
+                        let into_vacuum = target.element == ElementId::VACUUM;
+                        planned.push((Transfer::new(from, source, to, grams), into_vacuum));
+                    }
+                }
+            },
+        )
+    };
+    let (mut transfers, into_vacuum) = split_off_vacuum_claims(planned);
+    transfers.push(settle_vacuum_claims(into_vacuum, tick));
+    apply_batches(chunks, transfers);
 }
 
 /// How many of a Cell's faces touch gas or Vacuum, and so could carry gas.
-fn open_faces(chunks: &ActiveChunks, elements: &ElementTable, pos: CellPos) -> u32 {
+fn open_faces(cells: &impl Cells, elements: &ElementTable, pos: CellPos) -> u32 {
     FACES
         .into_iter()
-        .filter(|&face| is_open(cell_at(chunks, pos.offset(face)), elements))
+        .filter(|&face| is_open(cells.cell(pos.offset(face)), elements))
         .count() as u32
 }
 
@@ -208,9 +229,4 @@ fn is_open(cell: Cell, elements: &ElementTable) -> bool {
 
 pub(crate) fn is_gas(cell: Cell, elements: &ElementTable) -> bool {
     elements.get(cell.element).phase == Phase::Gas
-}
-
-/// Every gas Cell in the world.
-fn gas_cells(chunks: &ActiveChunks, elements: &ElementTable) -> Vec<CellPos> {
-    cells_where(chunks, |cell| is_gas(cell, elements))
 }

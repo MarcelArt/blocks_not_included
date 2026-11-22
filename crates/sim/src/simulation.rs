@@ -13,6 +13,11 @@ use crate::{gas, heat, liquid, phase_transition};
 /// Simulated time covered by one Tick.
 pub(crate) const TICK_SECONDS: f32 = 0.2;
 
+/// How many threads a Tick is split across unless [`Simulation::set_threads`] says otherwise.
+/// The game's Bevy task pools share the machine (`docs/plans/BEVY-0.20-NOTES.md`), so the
+/// simulation keeps to a few threads of its own.
+const DEFAULT_THREADS: usize = 3;
+
 /// Where new Chunks come from: the world generator, or a test's own.
 pub trait ChunkSource: Send {
     /// The Cells of the Chunk at `chunk`, which the simulation has never loaded: `CHUNK_SIZE³` of
@@ -82,6 +87,10 @@ pub struct Simulation {
     /// to `take_changed_chunks`.
     changed: BTreeSet<ChunkPos>,
     mass_lost_to_space_grams: u64,
+    /// How many threads a Tick is split across.
+    threads: usize,
+    /// The threads themselves, started by the first Tick.
+    pool: Option<rayon::ThreadPool>,
 }
 
 impl Simulation {
@@ -108,6 +117,8 @@ impl Simulation {
             ticks: 0,
             changed: BTreeSet::new(),
             mass_lost_to_space_grams: 0,
+            threads: DEFAULT_THREADS,
+            pool: None,
         };
         sim.move_region(placement.region());
         sim
@@ -134,6 +145,23 @@ impl Simulation {
 
     pub fn settings(&self) -> &SimSettings {
         &self.settings
+    }
+
+    /// Sets how many threads each Tick is split across, from the next Tick on; 0 counts as 1.
+    /// The default is 3.
+    ///
+    /// A Tick gives exactly the same result whatever the number of threads.
+    pub fn set_threads(&mut self, threads: usize) {
+        let threads = threads.max(1);
+        if threads != self.threads {
+            self.threads = threads;
+            self.pool = None;
+        }
+    }
+
+    /// How many threads each Tick is split across.
+    pub fn threads(&self) -> usize {
+        self.threads
     }
 
     /// Moves the focus of the Active Region to `pos`, such as the player's Cell. The Active
@@ -236,15 +264,27 @@ impl Simulation {
     /// Advances the Active Region by one Tick: heat, then gas, with gas in the world's top layer
     /// escaping to space, then liquid, then Phase Transitions. Dormant Chunks don't change.
     pub fn tick(&mut self) {
+        let threads = self.threads;
+        let pool = self.pool.get_or_insert_with(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|i| format!("sim-tick-{i}"))
+                .build()
+                .expect("the simulation's threads start")
+        });
         let chunks = &mut self.active;
-        let start = TickStart::record(chunks, &self.settings);
-        heat::conduct(chunks, &self.elements, self.settings.conduction_multiplier);
-        gas::flow(chunks, &self.elements, self.ticks, &self.settings);
-        self.mass_lost_to_space_grams +=
-            gas::escape_to_space(chunks, &self.elements, self.settings.gas_escape_fraction);
-        liquid::flow(chunks, &self.elements, self.ticks, &self.settings);
-        phase_transition::transform(chunks, &self.elements);
-        start.settle(chunks, &self.settings);
+        let (elements, settings, ticks) = (&self.elements, &self.settings, self.ticks);
+        let escaped = pool.install(|| {
+            let start = TickStart::record(chunks, settings);
+            heat::conduct(chunks, elements, settings.conduction_multiplier);
+            gas::flow(chunks, elements, ticks, settings);
+            let escaped = gas::escape_to_space(chunks, elements, settings.gas_escape_fraction);
+            liquid::flow(chunks, elements, ticks, settings);
+            phase_transition::transform(chunks, elements);
+            start.settle(chunks, settings);
+            escaped
+        });
+        self.mass_lost_to_space_grams += escaped;
         self.changed.extend(
             chunks
                 .iter()

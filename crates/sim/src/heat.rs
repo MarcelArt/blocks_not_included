@@ -1,10 +1,9 @@
-use std::collections::HashMap;
+use rayon::prelude::*;
 
 use crate::cell::Cell;
-use crate::chunk::{
-    ActiveChunks, CHUNK_SIZE, CHUNK_VOLUME, Chunk, ChunkPos, faces_awake, index, is_awake, local,
-};
+use crate::chunk::{ActiveChunks, CHUNK_SIZE, CHUNK_VOLUME, Chunk, index};
 use crate::element::{ElementId, ElementTable};
+use crate::grid::{Grid, change_chunks};
 use crate::simulation::TICK_SECONDS;
 
 /// Positive-axis face neighbours; visiting only these covers each shared face exactly once.
@@ -13,9 +12,10 @@ const FORWARD_FACES: [(i32, i32, i32); 3] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)];
 /// Moves heat between Cells that share a face.
 ///
 /// Every flow is computed from the temperatures at the start of the Tick and applied together
-/// afterwards, so no direction or processing order is favoured. Chunks are visited in a fixed
-/// order, so each Cell adds up its flows in the same order every time. `multiplier` speeds
-/// conduction up: with real values, heat takes days to cross one Cell.
+/// afterwards, so no direction or processing order is favoured. Each Cell adds up its flows in
+/// the same order every time, so f32 rounding comes out the same however the work is split
+/// across threads. `multiplier` speeds conduction up: with real values, heat takes days to cross
+/// one Cell.
 ///
 /// Faces inside a Settled Chunk are skipped. A face between two Chunks is processed if either
 /// Chunk is awake, so heat flows into and out of a Settled Chunk at its borders.
@@ -24,42 +24,17 @@ pub(crate) fn conduct(chunks: &mut ActiveChunks, elements: &ElementTable, multip
         elements,
         multiplier,
     };
-    let mut keys: Vec<ChunkPos> = chunks.keys().copied().collect();
-    keys.sort_unstable();
-    // Every Chunk that is awake or touches an awake Chunk may gain or lose heat.
-    let mut gained: HashMap<ChunkPos, Vec<f32>> = keys
-        .iter()
-        .copied()
-        .filter(|&key| is_awake(chunks, key) || faces_awake(chunks, key))
-        .map(|key| (key, vec![0.0; CHUNK_VOLUME]))
-        .collect();
-
-    for &key in &keys {
-        let chunk = &chunks[&key];
-        if chunk.is_awake() {
-            let gained_here = gained.get_mut(&key).expect("an awake Chunk has an entry");
-            gather_within_chunk(chunk, gained_here, &conduction);
-        }
-        for (axis, face) in FORWARD_FACES.into_iter().enumerate() {
-            let next = key.offset(face);
-            let Some(there) = chunks.get(&next) else {
-                continue;
-            };
-            if !chunk.is_awake() && !there.is_awake() {
-                continue;
-            }
-            let [Some(gained_here), Some(gained_there)] = gained.get_disjoint_mut([&key, &next])
-            else {
-                unreachable!("one of the two Chunks is awake, so both have entries");
-            };
-            gather_across_border(chunk, there, gained_here, gained_there, axis, &conduction);
-        }
-    }
-
-    for (key, gained) in gained {
-        let chunk = chunks
-            .get_mut(&key)
-            .expect("only existing Chunks have entries");
+    let (layout, gained) = {
+        let grid = Grid::new(chunks);
+        // Every Chunk that is awake or touches an awake Chunk may gain or lose heat.
+        let gained: Vec<Vec<f32>> = (0..grid.len())
+            .into_par_iter()
+            .with_max_len(1)
+            .map(|slot| gather(&grid, slot, &conduction).unwrap_or_default())
+            .collect();
+        (grid.into_layout(), gained)
+    };
+    change_chunks(chunks, &layout, gained, |chunk, gained| {
         for (index, joules) in gained.into_iter().enumerate() {
             let cell = chunk.cells[index];
             if joules != 0.0 && cell.element != ElementId::VACUUM {
@@ -73,7 +48,46 @@ pub(crate) fn conduct(chunks: &mut ActiveChunks, elements: &ElementTable, multip
                 );
             }
         }
+    });
+}
+
+/// The joules each Cell of the Chunk at `slot` gains this Tick, or `None` if neither it nor any
+/// Chunk it touches is awake.
+///
+/// A Cell adds up its flows in a fixed order: across its Chunk's borders with the neighbours
+/// below it on x, then y, then z; then within its Chunk, in the order of the Cells' indices;
+/// then across the borders with the neighbours above it on x, then y, then z. This is the order
+/// in which visiting the Chunks one at a time, sorted by position, and each one's faces toward
+/// its positive neighbours, would reach them.
+fn gather(grid: &Grid, slot: usize, conduction: &Conduction) -> Option<Vec<f32>> {
+    let (pos, chunk) = grid.at(slot);
+    let neighbour = |face: (i32, i32, i32)| grid.chunk(pos.offset(face));
+    let awake = chunk.is_awake();
+    let borders_awake = [-1, 1].into_iter().any(|sign| {
+        FORWARD_FACES
+            .into_iter()
+            .any(|(x, y, z)| neighbour((x * sign, y * sign, z * sign)).is_some_and(Chunk::is_awake))
+    });
+    if !awake && !borders_awake {
+        return None;
     }
+    let mut gained = vec![0.0; CHUNK_VOLUME];
+    // A border is processed if either Chunk is awake.
+    let processed = |face| neighbour(face).filter(|there: &&Chunk| awake || there.is_awake());
+    for (axis, (x, y, z)) in FORWARD_FACES.into_iter().enumerate() {
+        if let Some(below) = processed((-x, -y, -z)) {
+            gather_across_border(below, chunk, None, Some(&mut gained), axis, conduction);
+        }
+    }
+    if awake {
+        gather_within_chunk(chunk, &mut gained, conduction);
+    }
+    for (axis, face) in FORWARD_FACES.into_iter().enumerate() {
+        if let Some(above) = processed(face) {
+            gather_across_border(chunk, above, Some(&mut gained), None, axis, conduction);
+        }
+    }
+    Some(gained)
 }
 
 /// What decides how much heat crosses a face.
@@ -83,27 +97,37 @@ struct Conduction<'a> {
 }
 
 fn gather_within_chunk(chunk: &Chunk, gained: &mut [f32], conduction: &Conduction) {
-    for a in 0..CHUNK_VOLUME {
-        let (x, y, z) = local(a);
-        for (dx, dy, dz) in FORWARD_FACES {
-            let neighbour = (x + dx as usize, y + dy as usize, z + dz as usize);
-            if neighbour.0 >= CHUNK_SIZE || neighbour.1 >= CHUNK_SIZE || neighbour.2 >= CHUNK_SIZE {
-                continue;
+    let cells = &chunk.cells[..CHUNK_VOLUME];
+    let gained = &mut gained[..CHUNK_VOLUME];
+    let last = CHUNK_SIZE - 1;
+    // In the order of the Cells' indices: x fastest, then z, then y.
+    for y in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let a = index((x, y, z));
+                let neighbours = [
+                    (x < last).then(|| a + 1),
+                    (y < last).then(|| a + CHUNK_SIZE * CHUNK_SIZE),
+                    (z < last).then(|| a + CHUNK_SIZE),
+                ];
+                for b in neighbours.into_iter().flatten() {
+                    if let Some(joules) = conduction.flow(cells[a], cells[b]) {
+                        gained[a] += joules;
+                        gained[b] -= joules;
+                    }
+                }
             }
-            let b = index(neighbour);
-            let joules = conduction.flow(chunk.cells[a], chunk.cells[b]);
-            gained[a] += joules;
-            gained[b] -= joules;
         }
     }
 }
 
-/// Pairs the Cells on `here`'s positive face along `axis` with the touching Cells of `there`.
+/// Pairs the Cells on `here`'s positive face along `axis` with the touching Cells of `there`,
+/// adding the flows to whichever of the two Chunks' gains are given.
 fn gather_across_border(
     here: &Chunk,
     there: &Chunk,
-    gained_here: &mut [f32],
-    gained_there: &mut [f32],
+    mut gained_here: Option<&mut [f32]>,
+    mut gained_there: Option<&mut [f32]>,
     axis: usize,
     conduction: &Conduction,
 ) {
@@ -115,20 +139,30 @@ fn gather_across_border(
                 1 => (index((u, last, v)), index((u, 0, v))),
                 _ => (index((u, v, last)), index((u, v, 0))),
             };
-            let joules = conduction.flow(here.cells[a], there.cells[b]);
-            gained_here[a] += joules;
-            gained_there[b] -= joules;
+            if let Some(joules) = conduction.flow(here.cells[a], there.cells[b]) {
+                if let Some(gained) = gained_here.as_deref_mut() {
+                    gained[a] += joules;
+                }
+                if let Some(gained) = gained_there.as_deref_mut() {
+                    gained[b] -= joules;
+                }
+            }
         }
     }
 }
 
 impl Conduction<'_> {
-    /// Joules flowing from `b` into `a` across their shared face during one Tick.
-    fn flow(&self, a: Cell, b: Cell) -> f32 {
-        let elements = self.elements;
-        if a.element == ElementId::VACUUM || b.element == ElementId::VACUUM {
-            return 0.0;
+    /// Joules flowing from `b` into `a` across their shared face during one Tick, or `None`
+    /// where nothing can flow because a Cell is Vacuum or both are at the same finite temperature.
+    /// Adding or taking away a zero flow would change no sum, so those faces are skipped.
+    fn flow(&self, a: Cell, b: Cell) -> Option<f32> {
+        if a.element == ElementId::VACUUM
+            || b.element == ElementId::VACUUM
+            || (a.temperature_k == b.temperature_k && a.temperature_k.is_finite())
+        {
+            return None;
         }
+        let elements = self.elements;
         // The poorer conductor limits the flow.
         let conductivity = elements
             .get(a.element)
@@ -143,7 +177,7 @@ impl Conduction<'_> {
         let to_equal = (difference * capacity_a * capacity_b / (capacity_a + capacity_b)).abs();
         let cap = to_equal / 6.0;
         // Across a 1 m² face between Cells 1 m apart.
-        (conductivity * self.multiplier * TICK_SECONDS * difference).clamp(-cap, cap)
+        Some((conductivity * self.multiplier * TICK_SECONDS * difference).clamp(-cap, cap))
     }
 }
 
