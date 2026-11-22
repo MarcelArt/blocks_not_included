@@ -1,0 +1,10 @@
+[package]
+name = "worldgen"
+version = "0.1.0"
+edition = "2024"
+
+# This crate must never depend on Bevy (see docs/adr/0003-bevy-free-background-sim.md).
+[dependencies]
+# `f64` takes noise coordinates as f64, so the terrain keeps its detail far from the origin.
+fastnoise-lite = { version = "1.1.1", features = ["f64"] }
+sim = { path = "../sim" }

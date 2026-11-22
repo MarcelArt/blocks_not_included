@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["crates/sim"]
+members = ["crates/sim", "crates/worldgen"]
 
 [dependencies]
 bevy = { version = "0.20.1", features = ["dynamic_linking"] }
