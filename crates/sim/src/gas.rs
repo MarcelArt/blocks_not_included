@@ -26,11 +26,12 @@
 //!
 //! # How much moves
 //!
-//! Across each face, a gas Cell moves [`EVENING_OUT_FRACTION`] of the Mass difference, divided by
-//! the larger number of open faces of the two Cells (a Vacuum neighbour counts as 0 g). So a lone
-//! pair moves exactly that fraction. However many faces flow at once, each Cell's new Mass stays
-//! a blend of its neighbours' old Mass, so nothing overshoots, and no pass takes more than that
-//! fraction of a gas Cell's Mass, so it never empties. Flows are truncated to whole grams, which
+//! Across each face, a gas Cell moves [`SimSettings::gas_evening_out_fraction`] of the Mass
+//! difference, divided by the larger number of open faces of the two Cells (a Vacuum neighbour
+//! counts as 0 g). So a lone pair moves exactly that fraction. The fraction is at most 0.5, so
+//! however many faces flow at once, each Cell's new Mass stays a blend of its neighbours' old
+//! Mass, so nothing overshoots, and no pass takes more than that fraction of a gas Cell's Mass, so
+//! it never empties. Flows are truncated to whole grams, which
 //! is how gas comes to rest (ADR 0004).
 
 use std::collections::HashMap;
@@ -39,27 +40,28 @@ use crate::cell::{Cell, CellPos};
 use crate::chunk::{Chunk, ChunkPos, cell_at};
 use crate::displacement::displace;
 use crate::element::{ElementId, ElementTable, Phase};
+use crate::settings::SimSettings;
 use crate::transfer::{
     FACES, Transfer, UP, apply, cells_where, settle_vacuum_claims, share, swap_layers,
 };
 
-/// The fraction of the Mass difference that a lone pair of touching Cells evens out per Tick.
-///
-/// Up to 0.5, which would even out a lone pair in one Tick; any more would overshoot.
-pub(crate) const EVENING_OUT_FRACTION: f64 = 0.25;
-const _: () = assert!(EVENING_OUT_FRACTION > 0.0 && EVENING_OUT_FRACTION <= 0.5);
-
 /// Moves gas Mass for one Tick.
-pub(crate) fn flow(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: u64) {
+pub(crate) fn flow(
+    chunks: &mut HashMap<ChunkPos, Chunk>,
+    elements: &ElementTable,
+    tick: u64,
+    settings: &SimSettings,
+) {
+    let fraction = settings.gas_evening_out_fraction;
     // Rule 4: a gas Cell directly above a different, less dense gas swaps places with it.
     swap_layers(chunks, |above, below| sinks_through(above, below, elements));
     // Rule 5: Displacement.
     let pushes = gas_cells(chunks, elements)
         .into_iter()
-        .flat_map(|target| pushes_into(chunks, elements, target))
+        .flat_map(|target| pushes_into(chunks, elements, fraction, target))
         .collect();
     displace(chunks, tick, pushes);
-    spread(chunks, elements, tick);
+    spread(chunks, elements, fraction, tick);
 }
 
 /// Whether gas `above` sinks through gas `below`: they are different gases, and `above` is
@@ -77,6 +79,7 @@ fn sinks_through(above: Cell, below: Cell, elements: &ElementTable) -> bool {
 fn pushes_into(
     chunks: &HashMap<ChunkPos, Chunk>,
     elements: &ElementTable,
+    fraction: f64,
     target: CellPos,
 ) -> Vec<Transfer> {
     let held = cell_at(chunks, target);
@@ -92,7 +95,7 @@ fn pushes_into(
             continue;
         }
         let faces = face_count(chunks, elements, from, target);
-        let grams = share(source.mass_grams, 0, faces, EVENING_OUT_FRACTION);
+        let grams = share(source.mass_grams, 0, faces, fraction);
         if grams > 0 {
             pushes.push(Transfer::new(from, source, target, grams));
         }
@@ -122,7 +125,12 @@ fn layers(
 ///
 /// A Vacuum Cell becomes only one Element per Tick: when different gases reach it at once, the
 /// one offering the most grams wins, and the others' offers are withdrawn.
-fn spread(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: u64) {
+fn spread(
+    chunks: &mut HashMap<ChunkPos, Chunk>,
+    elements: &ElementTable,
+    fraction: f64,
+    tick: u64,
+) {
     let mut transfers = Vec::new();
     let mut into_vacuum = Vec::new();
     for from in gas_cells(chunks, elements) {
@@ -134,12 +142,7 @@ fn spread(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: 
                 continue;
             }
             let faces = face_count(chunks, elements, from, to);
-            let grams = share(
-                source.mass_grams,
-                target.mass_grams,
-                faces,
-                EVENING_OUT_FRACTION,
-            );
+            let grams = share(source.mass_grams, target.mass_grams, faces, fraction);
             if grams == 0 {
                 continue;
             }

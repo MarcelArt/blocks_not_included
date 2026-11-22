@@ -1,4 +1,4 @@
-use sim::{Cell, CellPos, Element, ElementId, ElementTable, Simulation};
+use sim::{Cell, CellPos, Element, ElementId, ElementTable, SimSettings, Simulation};
 
 fn cell(element: ElementId, mass_grams: u32, temperature_k: f32) -> Cell {
     Cell {
@@ -40,6 +40,14 @@ fn touching_cells_settle_at_their_heat_capacity_weighted_average_temperature() {
     let mut elements = ElementTable::new();
     let rock = elements.add(test_rock());
     let mut sim = Simulation::new(elements);
+    // This checks where conduction ends up, so every Chunk keeps simulating. With Settled Chunks
+    // on, the pair would freeze once its per-Tick change dropped below the settle threshold,
+    // about 0.36 K short of the average (an amendment approved by the human in step 05).
+    sim.set_settings(SimSettings {
+        settled_chunks_enabled: false,
+        ..SimSettings::default()
+    })
+    .expect("valid settings");
     let big = CellPos::new(0, 0, 0);
     let small = CellPos::new(1, 0, 0);
     sim.set(big, cell(rock, 3_000, 300.0));

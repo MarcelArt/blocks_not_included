@@ -69,6 +69,9 @@ _Avoid_: air, sky, ambient
 One step of the simulation on its fixed clock. Ticks are independent of the frame rate.
 _Avoid_: frame, update
 
+**Edit**:
+A change the player makes to one Cell with a god tool (place, dig, or shift temperature), applied between Ticks. Edits are the named exception to Mass conservation.
+
 **Overlay**:
 A view the player can toggle that colours Cells by a single property (Element, temperature or Mass) in place of their normal appearance.
 _Avoid_: lens, vision mode

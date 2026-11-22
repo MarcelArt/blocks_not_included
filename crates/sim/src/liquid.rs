@@ -36,18 +36,18 @@
 //!
 //! # How much moves sideways
 //!
-//! Across each sideways face, a Cell moves [`SPREADING_FRACTION`] of the Mass difference,
-//! divided by the larger number of non-solid sideways neighbours of the two Cells. So a lone pair
-//! evens out in one Tick, and however many faces flow at once, each Cell's new Mass stays a blend
-//! of its neighbours' old Mass: nothing overshoots or passes capacity. A Vacuum or gas neighbour
-//! counts as 0 g.
+//! Across each sideways face, a Cell moves [`SimSettings::liquid_spreading_fraction`] of the
+//! Mass difference, divided by the larger number of non-solid sideways neighbours of the two
+//! Cells. At the default of 0.5, a lone pair evens out in one Tick, and however many faces flow at
+//! once, each Cell's new Mass stays a blend of its neighbours' old Mass: nothing overshoots or
+//! passes capacity. A Vacuum or gas neighbour counts as 0 g.
 //!
 //! Within a pool, Cells of the same liquid even out with no threshold, like gas, until flows round
 //! to zero (ADR 0004). This keeps pools level. A pool's edge advances into Vacuum or gas only
-//! from a Cell holding at least the [`SPREADING_THRESHOLD`] more than the neighbour, so a pool
-//! stops spreading before it thins out to nothing. With that threshold on every sideways move,
-//! each pair of neighbours stopped just under it and the steps added up, leaving sloped mounds
-//! (an amendment to rule 4, approved by the human).
+//! from a Cell holding at least [`SimSettings::liquid_spreading_threshold`] of its Capacity more
+//! than the neighbour, so a pool stops spreading before it thins out to nothing. With that
+//! threshold on every sideways move, each pair of neighbours stopped just under it and the steps
+//! added up, leaving sloped mounds (an amendment to rule 4, approved by the human).
 
 use std::collections::HashMap;
 
@@ -56,29 +56,24 @@ use crate::chunk::{Chunk, ChunkPos, cell_at};
 use crate::displacement::displace;
 use crate::element::{ElementId, ElementTable, Phase};
 use crate::gas::is_gas;
+use crate::settings::SimSettings;
 use crate::transfer::{
     DOWN, FACES, SIDEWAYS, TieBreak, Transfer, apply, cells_where, pick, settle_vacuum_claims,
     share, swap_layers,
 };
 
-/// How much more a liquid Cell must hold than a Vacuum or gas neighbour before any of it spreads
-/// there, as a fraction of the liquid's capacity. A pool's edge stops advancing once its Cells
-/// hold less than this, which is what lets pools come to rest instead of thinning out forever.
-pub(crate) const SPREADING_THRESHOLD: f64 = 0.01;
-
-/// The fraction of the Mass difference that a lone pair of sideways neighbours evens out per Tick.
-///
-/// 0.5 evens out a lone pair in one Tick; any more would overshoot.
-pub(crate) const SPREADING_FRACTION: f64 = 0.5;
-const _: () = assert!(SPREADING_FRACTION > 0.0 && SPREADING_FRACTION <= 0.5);
-
 /// Moves liquid Mass for one Tick.
-pub(crate) fn flow(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: u64) {
+pub(crate) fn flow(
+    chunks: &mut HashMap<ChunkPos, Chunk>,
+    elements: &ElementTable,
+    tick: u64,
+    settings: &SimSettings,
+) {
     shed(chunks, elements, tick);
     swap_layers(chunks, |above, below| sinks_through(above, below, elements));
     fall(chunks, elements);
-    displace_gas(chunks, elements, tick);
-    spread(chunks, elements, tick);
+    displace_gas(chunks, elements, settings, tick);
+    spread(chunks, elements, settings, tick);
 }
 
 /// Rule 1: every liquid Cell holding more than its capacity sheds the excess into its face
@@ -229,10 +224,15 @@ fn fall(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable) {
 
 /// Rule 4: every liquid Cell that can't fall pushes part of its Mass sideways into neighbouring
 /// gas, through Displacement.
-fn displace_gas(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: u64) {
+fn displace_gas(
+    chunks: &mut HashMap<ChunkPos, Chunk>,
+    elements: &ElementTable,
+    settings: &SimSettings,
+    tick: u64,
+) {
     let pushes = cells_where(chunks, |cell| is_liquid(cell, elements))
         .into_iter()
-        .flat_map(|from| spreading_offers(chunks, elements, from))
+        .flat_map(|from| spreading_offers(chunks, elements, settings, from))
         .filter(|offer| is_gas(cell_at(chunks, offer.to), elements))
         .collect();
     displace(chunks, tick, pushes);
@@ -243,11 +243,16 @@ fn displace_gas(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, 
 ///
 /// A Vacuum Cell becomes only one Element per Tick: when different liquids reach it at once, the
 /// one offering the most grams wins, and the others' offers are withdrawn.
-fn spread(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: u64) {
+fn spread(
+    chunks: &mut HashMap<ChunkPos, Chunk>,
+    elements: &ElementTable,
+    settings: &SimSettings,
+    tick: u64,
+) {
     let mut transfers = Vec::new();
     let mut into_vacuum = Vec::new();
     for from in cells_where(chunks, |cell| is_liquid(cell, elements)) {
-        for offer in spreading_offers(chunks, elements, from) {
+        for offer in spreading_offers(chunks, elements, settings, from) {
             let target = cell_at(chunks, offer.to);
             if target.element == ElementId::VACUUM {
                 into_vacuum.push(offer);
@@ -272,6 +277,7 @@ fn spread(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: 
 fn spreading_offers(
     chunks: &HashMap<ChunkPos, Chunk>,
     elements: &ElementTable,
+    settings: &SimSettings,
     from: CellPos,
 ) -> Vec<Transfer> {
     let source = cell_at(chunks, from);
@@ -279,7 +285,7 @@ fn spreading_offers(
     if source.mass_grams > capacity || can_fall(chunks, elements, from) {
         return Vec::new();
     }
-    let threshold = (f64::from(capacity) * SPREADING_THRESHOLD) as u64;
+    let threshold = (f64::from(capacity) * settings.liquid_spreading_threshold) as u64;
     let mut offers = Vec::new();
     for face in SIDEWAYS {
         let to = from.offset(face);
@@ -298,7 +304,12 @@ fn spreading_offers(
             continue;
         };
         let faces = sideways_faces(chunks, elements, from, to);
-        let grams = share(source.mass_grams, fills_from, faces, SPREADING_FRACTION);
+        let grams = share(
+            source.mass_grams,
+            fills_from,
+            faces,
+            settings.liquid_spreading_fraction,
+        );
         if grams > 0 {
             offers.push(Transfer::new(from, source, to, grams));
         }

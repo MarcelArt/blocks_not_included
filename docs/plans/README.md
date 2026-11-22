@@ -9,7 +9,7 @@ Give these to an agent one at a time, in order, for example: "implement docs/pla
 | [02 Gas flow](02-gas-flow.md) | sim | done |
 | [03 Liquid flow](03-liquid-flow.md) | sim | done |
 | [04 Phase Transitions](04-phase-transitions.md) | sim | done |
-| [05 Tick pipeline, Edits, Settled Chunks](05-tick-pipeline.md) | sim | todo |
+| [05 Tick pipeline, Edits, Settled Chunks](05-tick-pipeline.md) | sim | done |
 | [06 Active Region and Dormant Chunks](06-active-region.md) | sim | todo |
 | [07 World generation](07-world-generation.md) | worldgen | todo |
 | [08 Performance](08-performance.md) | sim, worldgen | todo |

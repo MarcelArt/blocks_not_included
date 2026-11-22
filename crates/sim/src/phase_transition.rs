@@ -18,16 +18,21 @@
 
 use std::collections::HashMap;
 
+use crate::cell::Cell;
 use crate::chunk::{Chunk, ChunkPos};
 use crate::element::{ElementId, ElementTable, Side};
 
 /// Turns every Cell past one of its Element's thresholds into that threshold's target Element.
+///
+/// Settled Chunks are skipped, unless heat or Mass arrived in them across a border earlier in
+/// this Tick, which wakes them.
 pub(crate) fn transform(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable) {
     let thresholds = Thresholds::resolve(elements);
-    for chunk in chunks.values_mut() {
-        for cell in chunk.cells.iter_mut() {
-            if let Some(into) = thresholds.crossed(cell.element, cell.temperature_k) {
-                cell.element = into;
+    for chunk in chunks.values_mut().filter(|chunk| chunk.is_awake()) {
+        for index in 0..chunk.cells.len() {
+            let cell = chunk.cells[index];
+            if let Some(element) = thresholds.crossed(cell.element, cell.temperature_k) {
+                chunk.write(index, Cell { element, ..cell });
             }
         }
     }

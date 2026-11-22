@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{CHUNK_VOLUME, Chunk, ChunkPos, cell_at, set_cell};
+use crate::chunk::{CHUNK_VOLUME, Chunk, ChunkPos, cell_at, cells_facing_awake, set_cell};
 use crate::element::ElementId;
 
 pub(crate) const UP: (i32, i32, i32) = (0, 1, 0);
@@ -63,17 +63,29 @@ pub(crate) fn share(from_grams: u32, to_grams: u32, faces: u32, fraction: f64) -
     (difference * fraction / f64::from(faces)) as u32
 }
 
-/// The position of every Cell in the world for which `keep` holds.
+/// The position of every Cell that phenomena visit this Tick for which `keep` holds: every Cell
+/// of an awake Chunk, and the Cells of a Settled Chunk that share a face with an awake Chunk (see
+/// [`cells_facing_awake`]).
+///
+/// Every flow rule finds the Cells it moves Mass from, or into, with this, so a Settled Chunk
+/// takes part only at its borders with awake Chunks.
 pub(crate) fn cells_where(
     chunks: &HashMap<ChunkPos, Chunk>,
     keep: impl Fn(Cell) -> bool,
 ) -> Vec<CellPos> {
     let mut cells = Vec::new();
     for (&chunk_pos, chunk) in chunks {
-        for index in 0..CHUNK_VOLUME {
+        let mut visit = |index: usize| {
             if keep(chunk.cells[index]) {
                 cells.push(chunk_pos.cell_pos(index));
             }
+        };
+        if chunk.is_awake() {
+            (0..CHUNK_VOLUME).for_each(&mut visit);
+        } else {
+            cells_facing_awake(chunks, chunk_pos)
+                .into_iter()
+                .for_each(&mut visit);
         }
     }
     cells
