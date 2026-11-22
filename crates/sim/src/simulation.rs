@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::cell::{Cell, CellPos};
 use crate::chunk::{Chunk, ChunkPos, cell_at, set_cell};
 use crate::element::ElementTable;
-use crate::{gas, heat};
+use crate::{gas, heat, liquid};
 
 /// Simulated time covered by one Tick.
 pub(crate) const TICK_SECONDS: f32 = 0.2;
@@ -12,7 +12,7 @@ pub(crate) const TICK_SECONDS: f32 = 0.2;
 pub struct Simulation {
     elements: ElementTable,
     chunks: HashMap<ChunkPos, Chunk>,
-    /// How many Ticks have run; seeds the gas tie-breaks.
+    /// How many Ticks have run; seeds the flow tie-breaks.
     ticks: u64,
 }
 
@@ -46,6 +46,7 @@ impl Simulation {
     pub fn tick(&mut self) {
         heat::conduct(&mut self.chunks, &self.elements);
         gas::flow(&mut self.chunks, &self.elements, self.ticks);
+        liquid::flow(&mut self.chunks, &self.elements, self.ticks);
         self.ticks += 1;
     }
 }

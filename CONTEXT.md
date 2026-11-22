@@ -30,6 +30,10 @@ _Avoid_: amount, quantity, density
 A fixed property of each Element that decides which Element sinks beneath another, and how much Mass a full liquid Cell holds. It never depends on how much Mass a Cell currently holds.
 _Avoid_: weight, heaviness
 
+**Capacity**:
+The most Mass one liquid Cell holds: its Element's Density × 1 m³, so 1,000,000 g for Water. Only a Cell that has just become a liquid through a Phase Transition can briefly hold more.
+_Avoid_: max mass, volume
+
 **Phase Transition**:
 One Element becoming a different Element when its temperature crosses a threshold that Element defines, e.g. Water above 100 °C becomes Steam. An Element that defines no threshold never transitions.
 _Avoid_: state change, phase change

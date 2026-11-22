@@ -26,6 +26,8 @@ Each Tick runs heat, then gas. Add the liquid rules in a new module (`crates/sim
    - into gas neighbours, through Displacement (step 02).
    
    A sideways move needs the source to hold more than the target by at least a **spreading threshold**, a named constant around 1% of capacity. That threshold is what lets pools come to rest. Flows below 1 g round to zero.
+
+   *(Changed during implementation, approved by the human.)* The spreading threshold applies only to moves into Vacuum and gas, where a pool's edge advances. Same-liquid neighbours even out like gas, with no threshold, until flows round to zero. With the threshold on every sideways move, each neighbouring pair stopped just under it and the steps added up, so pools came to rest as sloped mounds and test 5 could not pass: a 5 × 5 floor ended between 48 kg and 112 kg per Cell, and wider floors never got fully covered.
 5. Moving Mass carries heat (step 02, rule 1). Liquids never enter solids, and solids never move.
 
 Apply the same ordering and bias rules as step 02: independent of direction and processing order, and deterministic.

@@ -7,7 +7,7 @@ Give these to an agent one at a time, in order, for example: "implement docs/pla
 | 00 Heat conduction: built before these plans, so it has no plan file. Code: [heat.rs](../../crates/sim/src/heat.rs); tests: [tests/heat.rs](../../crates/sim/tests/heat.rs) | sim | done |
 | [01 Element model and data file](01-element-model.md) | sim | done |
 | [02 Gas flow](02-gas-flow.md) | sim | done |
-| [03 Liquid flow](03-liquid-flow.md) | sim | todo |
+| [03 Liquid flow](03-liquid-flow.md) | sim | done |
 | [04 Phase Transitions](04-phase-transitions.md) | sim | todo |
 | [05 Tick pipeline, Edits, Settled Chunks](05-tick-pipeline.md) | sim | todo |
 | [06 Active Region and Dormant Chunks](06-active-region.md) | sim | todo |
