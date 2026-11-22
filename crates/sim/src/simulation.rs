@@ -1,60 +1,133 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{Chunk, ChunkPos, cell_at, set_cell};
+use crate::chunk::{ActiveChunks, CHUNK_VOLUME, Chunk, ChunkPos, locate};
 use crate::edit::Edit;
-use crate::element::ElementTable;
+use crate::element::{ElementId, ElementTable};
+use crate::region::{ActiveRegion, Placement, is_in_world};
 use crate::settings::{SettingsError, SimSettings};
 use crate::settled::TickStart;
+use crate::transfer::FACES;
 use crate::{gas, heat, liquid, phase_transition};
 
 /// Simulated time covered by one Tick.
 pub(crate) const TICK_SECONDS: f32 = 0.2;
+
+/// Where new Chunks come from: the world generator, or a test's own.
+pub trait ChunkSource: Send {
+    /// The Cells of the Chunk at `chunk`, which the simulation has never loaded: `CHUNK_SIZE³` of
+    /// them, in the order [`Simulation::chunk_cells`] lists them.
+    ///
+    /// The simulation asks for each Chunk at most once, and only for Chunks within the world's
+    /// vertical limits, from [`WORLD_BOTTOM_Y`](crate::WORLD_BOTTOM_Y) up to
+    /// [`WORLD_TOP_Y`](crate::WORLD_TOP_Y).
+    fn generate(&self, chunk: ChunkPos) -> Vec<Cell>;
+}
+
+/// The source behind [`Simulation::new`]: every Chunk is all Vacuum.
+struct VacuumSource;
+
+impl ChunkSource for VacuumSource {
+    fn generate(&self, _: ChunkPos) -> Vec<Cell> {
+        vec![Cell::VACUUM; CHUNK_VOLUME]
+    }
+}
 
 /// A summary of the simulation's state, for the debug panel and the log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SimStats {
     /// How many Ticks have run.
     pub tick_count: u64,
-    /// Chunks that the next Tick simulates.
+    /// Stored Chunks in the Active Region: `awake_chunks + settled_chunks`. A Chunk that has held
+    /// nothing but Vacuum since it was loaded needs no storage, and isn't counted.
+    pub active_chunks: usize,
+    /// Active Chunks that the next Tick simulates.
     pub awake_chunks: usize,
     /// Settled Chunks (`CONTEXT.md`), which the next Tick skips.
     pub settled_chunks: usize,
+    /// Stored Dormant Chunks (`CONTEXT.md`): loaded, but outside the Active Region, so their time
+    /// is stopped.
+    pub dormant_chunks: usize,
     /// The Mass of every Cell in the world added together.
     pub total_mass_grams: u64,
+    /// The Mass that gas has lost through the world's ceiling since the simulation started. This
+    /// is the second named exception to Mass conservation, after Edits.
+    pub mass_lost_to_space_grams: u64,
 }
 
-/// The whole simulated world. Any Cell that has never been set is Vacuum.
+/// The whole simulated world.
+///
+/// Only the Active Region (`CONTEXT.md`) is simulated: a box of Chunks around the focus, which
+/// [`focus_on`](Self::focus_on) moves. A Chunk entering it is loaded, from memory if it was loaded
+/// before and from the [`ChunkSource`] otherwise. Chunks outside it are Dormant: their time is
+/// stopped, and the Active Region's edge is sealed, so no Mass or heat crosses into them
+/// (ADR 0001). A Cell in a Chunk that isn't loaded reads as Vacuum.
 pub struct Simulation {
     elements: ElementTable,
     settings: SimSettings,
-    chunks: HashMap<ChunkPos, Chunk>,
+    source: Box<dyn ChunkSource>,
+    /// The stored Chunks of the Active Region, which every phenomenon works on.
+    active: ActiveChunks,
+    /// The stored Dormant Chunks.
+    dormant: HashMap<ChunkPos, Chunk>,
+    /// Chunks the source generated as nothing but Vacuum. They count as loaded without being
+    /// stored until something enters them, so this may also list some that are stored by now.
+    vacuum_only: HashSet<ChunkPos>,
+    focus: CellPos,
+    /// Where the Active Region's box sits; it follows the focus.
+    placement: Placement,
     /// How many Ticks have run; seeds the flow tie-breaks.
     ticks: u64,
-    /// Chunks in which a Cell has changed since the last call to `take_changed_chunks`.
+    /// Chunks loaded with something in them, or in which a Cell has changed, since the last call
+    /// to `take_changed_chunks`.
     changed: BTreeSet<ChunkPos>,
+    mass_lost_to_space_grams: u64,
 }
 
 impl Simulation {
+    /// A world of nothing but Vacuum.
     pub fn new(elements: ElementTable) -> Self {
-        Self {
+        Self::with_source(elements, Box::new(VacuumSource))
+    }
+
+    /// A world whose Chunks come from `source`. The Active Region around the default focus, the
+    /// origin, is loaded straight away.
+    pub fn with_source(elements: ElementTable, source: Box<dyn ChunkSource>) -> Self {
+        let settings = SimSettings::default();
+        let focus = CellPos::new(0, 0, 0);
+        let placement = Placement::around(focus, settings.active_region_chunks);
+        let mut sim = Self {
             elements,
-            settings: SimSettings::default(),
-            chunks: HashMap::new(),
+            settings,
+            source,
+            active: ActiveChunks::new(ActiveRegion::EMPTY),
+            dormant: HashMap::new(),
+            vacuum_only: HashSet::new(),
+            focus,
+            placement,
             ticks: 0,
             changed: BTreeSet::new(),
-        }
+            mass_lost_to_space_grams: 0,
+        };
+        sim.move_region(placement.region());
+        sim
     }
 
     /// Replaces the tuning values, which take effect from the next Tick, and wakes every Chunk,
-    /// since a Chunk at rest under the old values may not be under the new ones.
+    /// since a Chunk at rest under the old values may not be under the new ones. A new Active
+    /// Region size takes effect at once, with the box best centred on the focus.
     ///
     /// Rejects settings that fail [`SimSettings::validate`], keeping the previous ones.
     pub fn set_settings(&mut self, settings: SimSettings) -> Result<(), SettingsError> {
         settings.validate()?;
+        let resized = settings.active_region_chunks != self.settings.active_region_chunks;
         self.settings = settings;
-        for chunk in self.chunks.values_mut() {
+        for chunk in self.active.values_mut() {
             chunk.settled = false;
+        }
+        if resized {
+            self.placement = Placement::around(self.focus, self.settings.active_region_chunks);
+            self.move_region(self.placement.region());
         }
         Ok(())
     }
@@ -63,83 +136,206 @@ impl Simulation {
         &self.settings
     }
 
+    /// Moves the focus of the Active Region to `pos`, such as the player's Cell. The Active
+    /// Region follows with hysteresis (see `region.rs`), so walking back and forth doesn't shift
+    /// it. Chunks entering it are loaded and woken; Chunks leaving it become Dormant.
+    pub fn focus_on(&mut self, pos: CellPos) {
+        self.focus = pos;
+        self.placement = self.placement.follow(pos);
+        self.move_region(self.placement.region());
+    }
+
+    pub fn active_region(&self) -> ActiveRegion {
+        self.active.region
+    }
+
+    /// Loads the Chunk at `chunk` without making it active, for render distance: outside the
+    /// Active Region it is Dormant. Does nothing if it is loaded already, or if it lies outside
+    /// the world's vertical limits.
+    pub fn load(&mut self, chunk: ChunkPos) {
+        if is_in_world(chunk)
+            && !self.is_loaded(chunk)
+            && let Some(loaded) = self.generate(chunk)
+        {
+            // Every Chunk of the Active Region is loaded already, so this one is Dormant.
+            self.dormant.insert(chunk, loaded);
+        }
+    }
+
     /// Overwrites the Cell at `pos`, for tests and world generation, and wakes its Chunk.
+    ///
+    /// A Chunk that was never loaded is loaded first. In a Dormant Chunk the change is stored, and
+    /// takes effect once the Chunk is active. Outside the world's vertical limits, where no Chunk
+    /// is ever loaded, nothing happens.
     pub fn set(&mut self, pos: CellPos, cell: Cell) {
-        let changed = self.get(pos) != cell;
-        set_cell(&mut self.chunks, pos, cell);
-        let chunk_pos = ChunkPos::of(pos);
-        let chunk = self
-            .chunks
-            .get_mut(&chunk_pos)
-            .expect("set_cell creates the Chunk");
+        let (chunk_pos, index) = locate(pos);
+        let Some(chunk) = self.stored_mut(chunk_pos) else {
+            return;
+        };
+        let changed = chunk.cells[index] != cell;
+        chunk.write(index, cell);
         chunk.settled = false;
         if changed {
             self.changed.insert(chunk_pos);
         }
     }
 
-    /// Applies `edit` straight away. The game calls this between Ticks.
+    /// Applies `edit` straight away. The game calls this between Ticks. Like
+    /// [`set`](Self::set), an Edit to a Dormant Chunk takes effect once the Chunk is active.
     pub fn apply(&mut self, edit: Edit) {
         let pos = edit.pos();
         let cell = edit.result(self.get(pos));
         self.set(pos, cell);
     }
 
+    /// The Cell at `pos`. A Cell in a Chunk that isn't loaded reads as Vacuum.
     pub fn get(&self, pos: CellPos) -> Cell {
-        cell_at(&self.chunks, pos)
+        let (chunk, index) = locate(pos);
+        self.stored(chunk)
+            .map_or(Cell::VACUUM, |chunk| chunk.cells[index])
     }
 
-    /// The Cells of the Chunk at `chunk`, or `None` if it has never held anything.
+    /// The Cells of the loaded Chunk at `chunk`, or `None` if it isn't loaded or has held nothing
+    /// but Vacuum since it was.
     ///
     /// There are `CHUNK_SIZE³` of them, x fastest, then z, then y: the Cell at
     /// `chunk.origin()` offset by `(x, y, z)` is at index `(y × CHUNK_SIZE + z) × CHUNK_SIZE + x`.
     pub fn chunk_cells(&self, chunk: ChunkPos) -> Option<&[Cell]> {
-        self.chunks.get(&chunk).map(|chunk| &*chunk.cells)
+        self.stored(chunk).map(|chunk| &*chunk.cells)
     }
 
     /// The Mass of every Cell in the world added together.
     pub fn total_mass_grams(&self) -> u64 {
-        self.chunks
+        self.active
             .values()
+            .chain(self.dormant.values())
             .flat_map(|chunk| chunk.cells.iter())
             .map(|cell| u64::from(cell.mass_grams))
             .sum()
     }
 
-    /// Every Chunk in which any Cell has changed since the last call, sorted by x, then y, then
-    /// z. The list starts empty again afterwards.
+    /// Every Chunk loaded with something in it, or in which any Cell has changed, since the last
+    /// call, sorted by x, then y, then z. The list starts empty again afterwards.
     pub fn take_changed_chunks(&mut self) -> Vec<ChunkPos> {
         std::mem::take(&mut self.changed).into_iter().collect()
     }
 
     pub fn stats(&self) -> SimStats {
-        let settled_chunks = self.chunks.values().filter(|chunk| chunk.settled).count();
+        let settled_chunks = self.active.values().filter(|chunk| chunk.settled).count();
         SimStats {
             tick_count: self.ticks,
-            awake_chunks: self.chunks.len() - settled_chunks,
+            active_chunks: self.active.len(),
+            awake_chunks: self.active.len() - settled_chunks,
             settled_chunks,
+            dormant_chunks: self.dormant.len(),
             total_mass_grams: self.total_mass_grams(),
+            mass_lost_to_space_grams: self.mass_lost_to_space_grams,
         }
     }
 
-    /// Advances the simulation by one Tick: heat, then gas, then liquid, then Phase Transitions.
+    /// Advances the Active Region by one Tick: heat, then gas, with gas in the world's top layer
+    /// escaping to space, then liquid, then Phase Transitions. Dormant Chunks don't change.
     pub fn tick(&mut self) {
-        let start = TickStart::record(&mut self.chunks, &self.settings);
-        heat::conduct(
-            &mut self.chunks,
-            &self.elements,
-            self.settings.conduction_multiplier,
-        );
-        gas::flow(&mut self.chunks, &self.elements, self.ticks, &self.settings);
-        liquid::flow(&mut self.chunks, &self.elements, self.ticks, &self.settings);
-        phase_transition::transform(&mut self.chunks, &self.elements);
-        start.settle(&mut self.chunks, &self.settings);
+        let chunks = &mut self.active;
+        let start = TickStart::record(chunks, &self.settings);
+        heat::conduct(chunks, &self.elements, self.settings.conduction_multiplier);
+        gas::flow(chunks, &self.elements, self.ticks, &self.settings);
+        self.mass_lost_to_space_grams +=
+            gas::escape_to_space(chunks, &self.elements, self.settings.gas_escape_fraction);
+        liquid::flow(chunks, &self.elements, self.ticks, &self.settings);
+        phase_transition::transform(chunks, &self.elements);
+        start.settle(chunks, &self.settings);
         self.changed.extend(
-            self.chunks
+            chunks
                 .iter()
                 .filter(|(_, chunk)| chunk.touched)
                 .map(|(&pos, _)| pos),
         );
         self.ticks += 1;
+    }
+
+    /// Makes `region` the Active Region. Chunks leaving it become Dormant, and Chunks entering it
+    /// are loaded: from memory if they were loaded before, and from the source otherwise.
+    ///
+    /// A Chunk at rest against the old edge may not be at rest against the new one, and a Chunk
+    /// that was Settled when it left may face new neighbours. So every Chunk that entered, or
+    /// that shares a face with a Chunk that entered or left, is woken.
+    fn move_region(&mut self, region: ActiveRegion) {
+        let old = self.active.region;
+        if region == old {
+            return;
+        }
+        let leaving: Vec<ChunkPos> = self
+            .active
+            .keys()
+            .copied()
+            .filter(|&pos| !region.contains(pos))
+            .collect();
+        for pos in leaving {
+            let chunk = self.active.remove(&pos).expect("listed as active");
+            self.dormant.insert(pos, chunk);
+        }
+        self.active.region = region;
+        for pos in region.chunks().filter(|&pos| !old.contains(pos)) {
+            let chunk = match self.dormant.remove(&pos) {
+                Some(chunk) => Some(chunk),
+                None if self.vacuum_only.contains(&pos) => None,
+                None => self.generate(pos),
+            };
+            if let Some(chunk) = chunk {
+                self.active.insert(pos, chunk);
+            }
+        }
+        let moved = |pos: ChunkPos| old.contains(pos) != region.contains(pos);
+        for (&pos, chunk) in self.active.iter_mut() {
+            if moved(pos) || FACES.into_iter().any(|face| moved(pos.offset(face))) {
+                chunk.settled = false;
+            }
+        }
+    }
+
+    /// Whether the Chunk at `chunk` is loaded. Every Chunk of the Active Region is.
+    fn is_loaded(&self, chunk: ChunkPos) -> bool {
+        self.active.region.contains(chunk)
+            || self.dormant.contains_key(&chunk)
+            || self.vacuum_only.contains(&chunk)
+    }
+
+    /// Generates the never-loaded Chunk at `chunk` with the source. A Chunk of nothing but
+    /// Vacuum isn't stored, so it gives `None`. Any other is listed as changed, so it gets drawn.
+    fn generate(&mut self, chunk: ChunkPos) -> Option<Chunk> {
+        let cells = self.source.generate(chunk);
+        assert_eq!(
+            cells.len(),
+            CHUNK_VOLUME,
+            "a ChunkSource must give CHUNK_SIZE³ Cells, but it gave {} for {chunk:?}",
+            cells.len()
+        );
+        if cells.iter().all(|cell| cell.element == ElementId::VACUUM) {
+            self.vacuum_only.insert(chunk);
+            return None;
+        }
+        self.changed.insert(chunk);
+        Some(Chunk::from_cells(cells))
+    }
+
+    /// The stored Chunk at `chunk`, if it is loaded.
+    fn stored(&self, chunk: ChunkPos) -> Option<&Chunk> {
+        self.active.get(&chunk).or_else(|| self.dormant.get(&chunk))
+    }
+
+    /// The stored Chunk at `chunk`, loaded first if it never was, and stored if it held nothing
+    /// but Vacuum. `None` outside the world's vertical limits.
+    fn stored_mut(&mut self, chunk: ChunkPos) -> Option<&mut Chunk> {
+        if !is_in_world(chunk) {
+            return None;
+        }
+        self.load(chunk);
+        let chunks = if self.active.region.contains(chunk) {
+            &mut *self.active
+        } else {
+            &mut self.dormant
+        };
+        Some(chunks.entry(chunk).or_insert_with(Chunk::new))
     }
 }

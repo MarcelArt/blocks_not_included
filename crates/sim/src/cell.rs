@@ -14,6 +14,15 @@ impl Cell {
         mass_grams: 0,
         temperature_k: 0.0,
     };
+
+    /// What phenomena see beyond the Active Region's sealed, insulated edge (ADR 0001): a solid
+    /// that conducts no heat, so no Mass or heat crosses. It is never stored, and nothing outside
+    /// the simulation ever sees it.
+    pub(crate) const SEALED_EDGE: Cell = Cell {
+        element: ElementId::SEALED_EDGE,
+        mass_grams: 0,
+        temperature_k: 0.0,
+    };
 }
 
 /// A Cell's position in the world grid.

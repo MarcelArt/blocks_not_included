@@ -11,6 +11,10 @@ impl ElementId {
     /// Vacuum is built into every [`ElementTable`].
     pub const VACUUM: ElementId = ElementId(0);
 
+    /// The Element of [`Cell::SEALED_EDGE`](crate::Cell), what phenomena see beyond the Active
+    /// Region's edge. No table issues it, and every table looks it up as [`SEALED_EDGE`].
+    pub(crate) const SEALED_EDGE: ElementId = ElementId(u16::MAX);
+
     /// This Element's position in its table, as a compact number for renderers.
     ///
     /// Vacuum is 0. In a table loaded with [`ElementTable::from_ron`], every other index is the
@@ -255,7 +259,10 @@ impl fmt::Display for ElementError {
                 element,
                 side,
                 into,
-            } => write!(f, "{element:?}'s {side} Transition names {into:?}, which is not an Element"),
+            } => write!(
+                f,
+                "{element:?}'s {side} Transition names {into:?}, which is not an Element"
+            ),
             Self::WrongDirection {
                 element,
                 phase,
@@ -304,8 +311,15 @@ impl fmt::Display for ElementError {
                 property,
                 value,
             } => {
-                let needed = if *property == "conductivity" { "at least 0" } else { "above 0" };
-                write!(f, "{element:?} has {property} {value}, but it must be {needed}")
+                let needed = if *property == "conductivity" {
+                    "at least 0"
+                } else {
+                    "above 0"
+                };
+                write!(
+                    f,
+                    "{element:?} has {property} {value}, but it must be {needed}"
+                )
             }
             Self::VacuumPhase { element } => write!(
                 f,
@@ -316,6 +330,18 @@ impl fmt::Display for ElementError {
 }
 
 impl std::error::Error for ElementError {}
+
+/// The Element beyond the Active Region's sealed, insulated edge: a solid that conducts no heat.
+static SEALED_EDGE: Element = Element {
+    name: String::new(),
+    phase: Phase::Solid,
+    color: [0.0; 3],
+    density: 0.0,
+    specific_heat: 0.0,
+    conductivity: 0.0,
+    low: None,
+    high: None,
+};
 
 /// The layout of `assets/elements.ron`.
 #[derive(Deserialize)]
@@ -333,7 +359,11 @@ pub struct ElementTable {
 impl ElementTable {
     pub fn new() -> Self {
         Self {
-            elements: vec![Element::new("Vacuum").phase(Phase::Vacuum).color([0.0, 0.0, 0.0])],
+            elements: vec![
+                Element::new("Vacuum")
+                    .phase(Phase::Vacuum)
+                    .color([0.0, 0.0, 0.0]),
+            ],
         }
     }
 
@@ -352,7 +382,11 @@ impl ElementTable {
     }
 
     pub fn add(&mut self, element: Element) -> ElementId {
-        let id = ElementId(u16::try_from(self.elements.len()).expect("too many Elements"));
+        let id = u16::try_from(self.elements.len())
+            .ok()
+            .map(ElementId)
+            .filter(|&id| id != ElementId::SEALED_EDGE)
+            .expect("too many Elements");
         self.elements.push(element);
         id
     }
@@ -408,8 +442,16 @@ impl ElementTable {
         // Each check holds only for an in-range number, so NaN fails all of them.
         for (property, value, in_range) in [
             ("density", element.density, element.density > 0.0),
-            ("specific_heat", element.specific_heat, element.specific_heat > 0.0),
-            ("conductivity", element.conductivity, element.conductivity >= 0.0),
+            (
+                "specific_heat",
+                element.specific_heat,
+                element.specific_heat > 0.0,
+            ),
+            (
+                "conductivity",
+                element.conductivity,
+                element.conductivity >= 0.0,
+            ),
         ] {
             if !in_range {
                 return Err(ElementError::InvalidProperty {
@@ -473,6 +515,9 @@ impl ElementTable {
     ///
     /// If `id` was issued by a different table that holds more Elements.
     pub fn get(&self, id: ElementId) -> &Element {
+        if id == ElementId::SEALED_EDGE {
+            return &SEALED_EDGE;
+        }
         &self.elements[usize::from(id.0)]
     }
 

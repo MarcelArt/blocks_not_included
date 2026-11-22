@@ -281,8 +281,9 @@ fn in_a_stack_of_three_gases_each_cell_swaps_at_most_once_per_tick() {
     let middle = elements.add(test_gas("Middle", 1.0));
     let light = elements.add(test_gas("Light", 0.09));
     let mut sim = Simulation::new(elements);
-    // Chunks are 32 Cells tall, so this column straddles a Chunk border.
-    let column = [31, 32, 33].map(|y| CellPos::new(0, y, 0));
+    // Chunks are 32 Cells tall, so this column straddles the Chunk border at y = 0. (It sat at
+    // y = 31..=33 until step 06; the default Active Region ends at y = 31.)
+    let column = [-1, 0, 1].map(|y| CellPos::new(0, y, 0));
     let sealed = SealedBox::build(&mut sim, wall, column[0], column[2]);
     // Lightest at the bottom, so the middle Cell is in two pairs that both want to swap.
     for (pos, element) in column.into_iter().zip([light, middle, heavy]) {

@@ -175,9 +175,12 @@ fn a_chunk_where_nothing_happens_is_settled_after_one_tick() {
         sim.stats(),
         SimStats {
             tick_count: 0,
+            active_chunks: 1,
             awake_chunks: 1,
             settled_chunks: 0,
+            dormant_chunks: 0,
             total_mass_grams,
+            mass_lost_to_space_grams: 0,
         },
         "setting Cells wakes their Chunk"
     );
@@ -188,9 +191,12 @@ fn a_chunk_where_nothing_happens_is_settled_after_one_tick() {
         sim.stats(),
         SimStats {
             tick_count: 1,
+            active_chunks: 1,
             awake_chunks: 0,
             settled_chunks: 1,
+            dormant_chunks: 0,
             total_mass_grams,
+            mass_lost_to_space_grams: 0,
         }
     );
 }

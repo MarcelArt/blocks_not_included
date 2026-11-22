@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 use crate::cell::{Cell, CellPos};
+use crate::region::ActiveRegion;
 use crate::transfer::FACES;
 
 /// How many Cells wide a Chunk is along each axis.
@@ -96,18 +98,60 @@ fn face_layer(face: (i32, i32, i32)) -> impl Iterator<Item = usize> {
     })
 }
 
-/// The Cell at `pos`. Any Cell in a Chunk that doesn't exist yet is Vacuum.
-pub(crate) fn cell_at(chunks: &HashMap<ChunkPos, Chunk>, pos: CellPos) -> Cell {
-    let (chunk, index) = locate(pos);
-    chunks
-        .get(&chunk)
-        .map_or(Cell::VACUUM, |chunk| chunk.cells[index])
+/// The Chunks that every phenomenon works on: the stored Chunks of the Active Region. It
+/// dereferences to the map of those Chunks.
+///
+/// A Chunk of the Active Region that isn't stored holds nothing but Vacuum: a Chunk generated
+/// that way needs no storage until something enters it. Every Cell outside the Active Region lies
+/// beyond its sealed, insulated edge (ADR 0001), and reads as [`Cell::SEALED_EDGE`], a solid that
+/// conducts no heat. So no Mass or heat crosses the edge, and Dormant Chunks are never touched.
+pub(crate) struct ActiveChunks {
+    chunks: HashMap<ChunkPos, Chunk>,
+    pub region: ActiveRegion,
 }
 
-/// Overwrites the Cell at `pos`, creating its Chunk if needed, and marks the Chunk touched if the
-/// Cell changed.
-pub(crate) fn set_cell(chunks: &mut HashMap<ChunkPos, Chunk>, pos: CellPos, cell: Cell) {
+impl ActiveChunks {
+    pub fn new(region: ActiveRegion) -> Self {
+        Self {
+            chunks: HashMap::new(),
+            region,
+        }
+    }
+}
+
+impl Deref for ActiveChunks {
+    type Target = HashMap<ChunkPos, Chunk>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.chunks
+    }
+}
+
+impl DerefMut for ActiveChunks {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.chunks
+    }
+}
+
+/// The Cell at `pos`: Vacuum in a Chunk of the Active Region that isn't stored, and
+/// [`Cell::SEALED_EDGE`] outside the Active Region.
+pub(crate) fn cell_at(chunks: &ActiveChunks, pos: CellPos) -> Cell {
     let (chunk, index) = locate(pos);
+    match chunks.get(&chunk) {
+        Some(chunk) => chunk.cells[index],
+        None if chunks.region.contains(chunk) => Cell::VACUUM,
+        None => Cell::SEALED_EDGE,
+    }
+}
+
+/// Overwrites the Cell at `pos`, which must lie in the Active Region, storing its Chunk if needed,
+/// and marks the Chunk touched if the Cell changed.
+pub(crate) fn set_cell(chunks: &mut ActiveChunks, pos: CellPos, cell: Cell) {
+    let (chunk, index) = locate(pos);
+    debug_assert!(
+        chunks.region.contains(chunk),
+        "{pos:?} lies beyond the Active Region's sealed edge"
+    );
     chunks
         .entry(chunk)
         .or_insert_with(Chunk::new)
@@ -153,8 +197,14 @@ pub(crate) struct Chunk {
 impl Chunk {
     /// An awake Chunk of Vacuum.
     pub fn new() -> Self {
+        Self::from_cells(vec![Cell::VACUUM; CHUNK_VOLUME])
+    }
+
+    /// An awake Chunk of `cells`, which must number `CHUNK_VOLUME`.
+    pub fn from_cells(cells: Vec<Cell>) -> Self {
+        debug_assert_eq!(cells.len(), CHUNK_VOLUME);
         Self {
-            cells: vec![Cell::VACUUM; CHUNK_VOLUME].into_boxed_slice(),
+            cells: cells.into_boxed_slice(),
             settled: false,
             touched: false,
         }

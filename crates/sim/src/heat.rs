@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::cell::Cell;
 use crate::chunk::{
-    CHUNK_SIZE, CHUNK_VOLUME, Chunk, ChunkPos, faces_awake, index, is_awake, local,
+    ActiveChunks, CHUNK_SIZE, CHUNK_VOLUME, Chunk, ChunkPos, faces_awake, index, is_awake, local,
 };
 use crate::element::{ElementId, ElementTable};
 use crate::simulation::TICK_SECONDS;
@@ -19,11 +19,7 @@ const FORWARD_FACES: [(i32, i32, i32); 3] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)];
 ///
 /// Faces inside a Settled Chunk are skipped. A face between two Chunks is processed if either
 /// Chunk is awake, so heat flows into and out of a Settled Chunk at its borders.
-pub(crate) fn conduct(
-    chunks: &mut HashMap<ChunkPos, Chunk>,
-    elements: &ElementTable,
-    multiplier: f32,
-) {
+pub(crate) fn conduct(chunks: &mut ActiveChunks, elements: &ElementTable, multiplier: f32) {
     let conduction = Conduction {
         elements,
         multiplier,

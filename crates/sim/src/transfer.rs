@@ -10,10 +10,10 @@
 //! tie-break seeded by the Tick count and Cell position, so nothing depends on `HashMap`
 //! iteration order and the same state and Tick count always give the same result.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{CHUNK_VOLUME, Chunk, ChunkPos, cell_at, cells_facing_awake, set_cell};
+use crate::chunk::{ActiveChunks, CHUNK_VOLUME, cell_at, cells_facing_awake, set_cell};
 use crate::element::ElementId;
 
 pub(crate) const UP: (i32, i32, i32) = (0, 1, 0);
@@ -69,12 +69,9 @@ pub(crate) fn share(from_grams: u32, to_grams: u32, faces: u32, fraction: f64) -
 ///
 /// Every flow rule finds the Cells it moves Mass from, or into, with this, so a Settled Chunk
 /// takes part only at its borders with awake Chunks.
-pub(crate) fn cells_where(
-    chunks: &HashMap<ChunkPos, Chunk>,
-    keep: impl Fn(Cell) -> bool,
-) -> Vec<CellPos> {
+pub(crate) fn cells_where(chunks: &ActiveChunks, keep: impl Fn(Cell) -> bool) -> Vec<CellPos> {
     let mut cells = Vec::new();
-    for (&chunk_pos, chunk) in chunks {
+    for (&chunk_pos, chunk) in chunks.iter() {
         let mut visit = |index: usize| {
             if keep(chunk.cells[index]) {
                 cells.push(chunk_pos.cell_pos(index));
@@ -95,10 +92,7 @@ pub(crate) fn cells_where(
 /// Element, Mass and temperature.
 ///
 /// `sinks(above, below)` decides whether `above` sinks through `below`.
-pub(crate) fn swap_layers(
-    chunks: &mut HashMap<ChunkPos, Chunk>,
-    sinks: impl Fn(Cell, Cell) -> bool,
-) {
+pub(crate) fn swap_layers(chunks: &mut ActiveChunks, sinks: impl Fn(Cell, Cell) -> bool) {
     let swaps: Vec<CellPos> = cells_where(chunks, |cell| cell.element != ElementId::VACUUM)
         .into_iter()
         .filter(|&lower| swaps_upward(chunks, &sinks, lower))
@@ -119,7 +113,7 @@ pub(crate) fn swap_layers(
 /// (gas by Density; liquid above any gas, then by Density), so no Element appears twice in a run,
 /// and the run is never longer than the number of Elements.
 fn swaps_upward(
-    chunks: &HashMap<ChunkPos, Chunk>,
+    chunks: &ActiveChunks,
     sinks: &impl Fn(Cell, Cell) -> bool,
     lower: CellPos,
 ) -> bool {
@@ -225,7 +219,7 @@ struct Change {
 /// Mass takes on the arriving Element and temperature.
 ///
 /// A Cell may only receive an Element it already holds, or one that replaces everything it held.
-pub(crate) fn apply(chunks: &mut HashMap<ChunkPos, Chunk>, mut transfers: Vec<Transfer>) {
+pub(crate) fn apply(chunks: &mut ActiveChunks, mut transfers: Vec<Transfer>) {
     // Sorted so every Cell mixes its arrivals in the same order, whatever order they were
     // planned in.
     let mut changes: BTreeMap<(i32, i32, i32), Change> = BTreeMap::new();

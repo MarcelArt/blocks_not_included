@@ -51,6 +51,10 @@ A fixed-size cube of Cells. It is the unit in which the world is generated, load
 The box of Chunks around the player that is simulated. Its boundary is sealed and insulated, so no Mass or heat crosses into a Dormant Chunk.
 _Avoid_: simulation bubble, sim radius, loaded area
 
+**Focus**:
+The Cell the Active Region is centred on, normally the player's. The Active Region follows it with hysteresis, so small moves back and forth don't shift the box.
+_Avoid_: centre, anchor, camera
+
 **Dormant Chunk**:
 A Chunk outside the Active Region. Its time is stopped, and when it rejoins the Active Region it resumes exactly as it was left.
 _Avoid_: frozen chunk, sleeping chunk, unloaded chunk

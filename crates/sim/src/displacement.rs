@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::cell::CellPos;
-use crate::chunk::{Chunk, ChunkPos, cell_at};
+use crate::chunk::{ActiveChunks, cell_at};
 use crate::element::ElementId;
 use crate::transfer::{FACES, TieBreak, Transfer, apply, key, pick, strongest_element, tie_break};
 
@@ -39,7 +39,7 @@ struct Role {
 /// Gas Cells are considered in a pseudo-random order seeded by the Tick count and position. Each
 /// Cell takes the first role offered: a vacated Cell can't push or receive, a pushing Cell can't
 /// be vacated, and an exit can't be vacated or turn Vacuum into two different Elements.
-pub(crate) fn displace(chunks: &mut HashMap<ChunkPos, Chunk>, tick: u64, pushes: Vec<Transfer>) {
+pub(crate) fn displace(chunks: &mut ActiveChunks, tick: u64, pushes: Vec<Transfer>) {
     let mut pushes_into: HashMap<CellPos, Vec<Transfer>> = HashMap::new();
     for push in pushes {
         pushes_into.entry(push.to).or_default().push(push);
@@ -108,7 +108,7 @@ pub(crate) fn displace(chunks: &mut HashMap<ChunkPos, Chunk>, tick: u64, pushes:
 
 /// Where the gas in `pos` could go if it were displaced: face neighbours holding the same gas,
 /// or Vacuum.
-fn exits(chunks: &HashMap<ChunkPos, Chunk>, pos: CellPos) -> Vec<CellPos> {
+fn exits(chunks: &ActiveChunks, pos: CellPos) -> Vec<CellPos> {
     let element = cell_at(chunks, pos).element;
     FACES
         .into_iter()

@@ -49,10 +49,8 @@
 //! threshold on every sideways move, each pair of neighbours stopped just under it and the steps
 //! added up, leaving sloped mounds (an amendment to rule 4, approved by the human).
 
-use std::collections::HashMap;
-
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{Chunk, ChunkPos, cell_at};
+use crate::chunk::{ActiveChunks, cell_at};
 use crate::displacement::displace;
 use crate::element::{ElementId, ElementTable, Phase};
 use crate::gas::is_gas;
@@ -64,7 +62,7 @@ use crate::transfer::{
 
 /// Moves liquid Mass for one Tick.
 pub(crate) fn flow(
-    chunks: &mut HashMap<ChunkPos, Chunk>,
+    chunks: &mut ActiveChunks,
     elements: &ElementTable,
     tick: u64,
     settings: &SimSettings,
@@ -80,8 +78,8 @@ pub(crate) fn flow(
 /// neighbours, in all six directions: first into gas, through Displacement, then into Vacuum and
 /// into Cells of the same liquid with room. A Cell with no such neighbour stays over capacity,
 /// because compression is not modelled.
-fn shed(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable, tick: u64) {
-    let over_capacity = |chunks: &HashMap<ChunkPos, Chunk>| {
+fn shed(chunks: &mut ActiveChunks, elements: &ElementTable, tick: u64) {
+    let over_capacity = |chunks: &ActiveChunks| {
         cells_where(chunks, |cell| {
             is_liquid(cell, elements) && cell.mass_grams > capacity(cell.element, elements)
         })
@@ -132,7 +130,7 @@ enum Shedding {
 /// neighbour has the room of Vacuum, since once its gas has gone (Displacement) the liquid fills
 /// it as if it were Vacuum.
 fn shedding_offers(
-    chunks: &HashMap<ChunkPos, Chunk>,
+    chunks: &ActiveChunks,
     elements: &ElementTable,
     tick: u64,
     from: CellPos,
@@ -174,7 +172,7 @@ fn shedding_offers(
 
 /// How many over-capacity Cells of `liquid` touch `pos`, counting at least one.
 fn over_capacity_neighbours(
-    chunks: &HashMap<ChunkPos, Chunk>,
+    chunks: &ActiveChunks,
     elements: &ElementTable,
     pos: CellPos,
     liquid: ElementId,
@@ -207,7 +205,7 @@ fn sinks_through(above: Cell, below: Cell, elements: &ElementTable) -> bool {
 ///
 /// Each Cell receives from the one Cell above it at most, and never more than its room, so no
 /// Cell ends up over capacity, even one that is also falling.
-fn fall(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable) {
+fn fall(chunks: &mut ActiveChunks, elements: &ElementTable) {
     let mut transfers = Vec::new();
     for from in cells_where(chunks, |cell| is_liquid(cell, elements)) {
         let source = cell_at(chunks, from);
@@ -225,7 +223,7 @@ fn fall(chunks: &mut HashMap<ChunkPos, Chunk>, elements: &ElementTable) {
 /// Rule 4: every liquid Cell that can't fall pushes part of its Mass sideways into neighbouring
 /// gas, through Displacement.
 fn displace_gas(
-    chunks: &mut HashMap<ChunkPos, Chunk>,
+    chunks: &mut ActiveChunks,
     elements: &ElementTable,
     settings: &SimSettings,
     tick: u64,
@@ -243,12 +241,7 @@ fn displace_gas(
 ///
 /// A Vacuum Cell becomes only one Element per Tick: when different liquids reach it at once, the
 /// one offering the most grams wins, and the others' offers are withdrawn.
-fn spread(
-    chunks: &mut HashMap<ChunkPos, Chunk>,
-    elements: &ElementTable,
-    settings: &SimSettings,
-    tick: u64,
-) {
+fn spread(chunks: &mut ActiveChunks, elements: &ElementTable, settings: &SimSettings, tick: u64) {
     let mut transfers = Vec::new();
     let mut into_vacuum = Vec::new();
     for from in cells_where(chunks, |cell| is_liquid(cell, elements)) {
@@ -275,7 +268,7 @@ fn spread(
 ///   thinning out forever. A gas neighbour is offered what Vacuum would be, since once its gas has
 ///   gone (Displacement) the liquid fills it as if it were Vacuum.
 fn spreading_offers(
-    chunks: &HashMap<ChunkPos, Chunk>,
+    chunks: &ActiveChunks,
     elements: &ElementTable,
     settings: &SimSettings,
     from: CellPos,
@@ -318,7 +311,7 @@ fn spreading_offers(
 }
 
 /// Whether the liquid Cell at `pos` can fall: into the Cell below it, or through it.
-fn can_fall(chunks: &HashMap<ChunkPos, Chunk>, elements: &ElementTable, pos: CellPos) -> bool {
+fn can_fall(chunks: &ActiveChunks, elements: &ElementTable, pos: CellPos) -> bool {
     let (cell, below) = (cell_at(chunks, pos), cell_at(chunks, pos.offset(DOWN)));
     room_for(cell, below, elements) > 0 || sinks_through(cell, below, elements)
 }
@@ -327,12 +320,7 @@ fn can_fall(chunks: &HashMap<ChunkPos, Chunk>, elements: &ElementTable, pos: Cel
 ///
 /// Dividing each face's flow by this keeps every Cell's new Mass a blend of its neighbours' old
 /// Mass, however many faces flow at once, so nothing overshoots.
-fn sideways_faces(
-    chunks: &HashMap<ChunkPos, Chunk>,
-    elements: &ElementTable,
-    a: CellPos,
-    b: CellPos,
-) -> u32 {
+fn sideways_faces(chunks: &ActiveChunks, elements: &ElementTable, a: CellPos, b: CellPos) -> u32 {
     let open = |pos: CellPos| {
         SIDEWAYS
             .into_iter()

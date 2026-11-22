@@ -32,6 +32,13 @@ pub struct SimSettings {
     /// advancing once its Cells hold less than this, which is what lets pools come to rest
     /// instead of thinning out forever.
     pub liquid_spreading_threshold: f64,
+    /// How many Chunks the Active Region spans along x, y and z, each from 1 to 1024, written
+    /// `(4, 2, 4)` in a settings file. Where it sits is described in `region.rs`.
+    pub active_region_chunks: [u32; 3],
+    /// The fraction of its Mass that each gas Cell in the top layer of the world escapes to space
+    /// per Tick, from 0 to 1. Like every flow, it is rounded down to whole grams (ADR 0004), so
+    /// a Cell holding less than `1 / gas_escape_fraction` grams keeps what it has.
+    pub gas_escape_fraction: f64,
 }
 
 impl Default for SimSettings {
@@ -43,6 +50,8 @@ impl Default for SimSettings {
             gas_evening_out_fraction: 0.25,
             liquid_spreading_fraction: 0.5,
             liquid_spreading_threshold: 0.01,
+            active_region_chunks: [4, 2, 4],
+            gas_escape_fraction: 0.01,
         }
     }
 }
@@ -53,6 +62,13 @@ impl SimSettings {
     /// and one above 1 would move Mass a Cell doesn't hold.
     pub fn validate(&self) -> Result<(), SettingsError> {
         let fraction = "above 0 and at most 0.5";
+        let region_chunks = 1..=1024;
+        // The first Chunk count out of range, or else the first Chunk count.
+        let region_chunks_value = self
+            .active_region_chunks
+            .into_iter()
+            .find(|chunks| !region_chunks.contains(chunks))
+            .unwrap_or(self.active_region_chunks[0]);
         // Each check holds only for an in-range number, so NaN fails all of them.
         let checks = [
             (
@@ -84,6 +100,18 @@ impl SimSettings {
                 self.liquid_spreading_threshold,
                 "from 0 to 1",
                 (0.0..=1.0).contains(&self.liquid_spreading_threshold),
+            ),
+            (
+                "active_region_chunks",
+                f64::from(region_chunks_value),
+                "from 1 to 1024 along each axis",
+                region_chunks.contains(&region_chunks_value),
+            ),
+            (
+                "gas_escape_fraction",
+                self.gas_escape_fraction,
+                "from 0 to 1",
+                (0.0..=1.0).contains(&self.gas_escape_fraction),
             ),
         ];
         for (setting, value, allowed, in_range) in checks {

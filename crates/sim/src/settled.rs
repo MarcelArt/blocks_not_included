@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::cell::Cell;
-use crate::chunk::{Chunk, ChunkPos};
+use crate::chunk::{ActiveChunks, ChunkPos};
 use crate::settings::SimSettings;
 
 /// The Cells of every awake Chunk at the start of a Tick, to compare with at its end.
@@ -20,7 +20,7 @@ pub(crate) struct TickStart {
 
 impl TickStart {
     /// Records the awake Chunks and forgets which Chunks were touched before this Tick.
-    pub fn record(chunks: &mut HashMap<ChunkPos, Chunk>, settings: &SimSettings) -> Self {
+    pub fn record(chunks: &mut ActiveChunks, settings: &SimSettings) -> Self {
         let mut awake = HashMap::new();
         for (&pos, chunk) in chunks.iter_mut() {
             chunk.touched = false;
@@ -32,7 +32,7 @@ impl TickStart {
     }
 
     /// Decides which Chunks are Settled for the next Tick.
-    pub fn settle(self, chunks: &mut HashMap<ChunkPos, Chunk>, settings: &SimSettings) {
+    pub fn settle(self, chunks: &mut ActiveChunks, settings: &SimSettings) {
         for (pos, chunk) in chunks.iter_mut() {
             chunk.settled = if !settings.settled_chunks_enabled {
                 false

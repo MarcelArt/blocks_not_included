@@ -21,6 +21,17 @@ Only the Active Region around a focus point is simulated. Chunks outside it are 
   - **Ceiling:** each Tick, a gas Cell in the top layer loses a fraction of its Mass (a `SimSettings` value) out of the world. This is the second named exception to Mass conservation; count it as `mass_lost_to_space_grams` in `SimStats`.
 - **`SimStats`** gains `active_chunks` and `dormant_chunks`.
 
+### Decisions made during implementation
+
+- **Placement and hysteresis** (`crates/sim/src/region.rs`). Along each axis the box sits where its centre is nearest the focus. It moves only once the focus is more than 4 Cells past the point where the next box over would be better centred. With the default even sizes that point runs through the middle of a Chunk, so crossing a Chunk border never moves the box. A focus-Chunk box would have left the focus as little as 1 Cell from the top of a 2-Chunk-tall region.
+- **World limits** cut the box off rather than shifting it, so near the floor or ceiling the Active Region holds 16 Chunks instead of 32.
+- **The sealed edge.** Phenomena see every Cell outside the Active Region as a solid that conducts no heat. Floor and ceiling are that same edge; only the ceiling lets gas out.
+- **All-Vacuum Chunks aren't stored.** A generated Chunk of nothing but Vacuum counts as loaded, but takes no memory until something enters it. `chunk_cells` returns `None` for it, and `SimStats` doesn't count it. This keeps `Simulation::new` as cheap as before, and keeps step 05's Chunk counts. The source is still asked for each Chunk only once.
+- **Waking.** When the Active Region moves, every Chunk that entered, and every Chunk sharing a face with one that entered or left, is woken. A Settled Chunk against the old edge may not be at rest against the new one.
+- **New public items:** `ActiveRegion` (returned by `Simulation::active_region`), `WORLD_BOTTOM_Y`, `WORLD_TOP_Y`, and the settings `active_region_chunks` (written `(4, 2, 4)` in RON) and `gas_escape_fraction` (default 0.01). Gas escapes right after gas flow in each Tick.
+- **`take_changed_chunks`** also lists Chunks loaded with something in them, so step 09 can send them.
+- *(Approved by the human.)* Step 02's three-gas stack test sat at y = 31..=33, beyond the default region's top at y = 31, while other tests reach down to y = −4. Its column now straddles the Chunk border at y = 0 instead.
+
 ## Seams and tests
 
 **Seam:** `Simulation`, plus `ChunkSource`. Test sources fill Chunks with a marker Element. Put the tests in `crates/sim/tests/active_region.rs`, in this order:
@@ -33,9 +44,15 @@ Only the Active Region around a focus point is simulated. Chunks outside it are 
 6. Gas in the top layer of the world leaves over time; `stats` reports exactly the Mass lost, and all other Mass is conserved.
 7. Chunks below `WORLD_BOTTOM_Y` or at or above `WORLD_TOP_Y` never load, even when the focus is near the limit.
 
+Added during implementation, at the same seam:
+
+- Gas on the world's floor never leaves through it.
+- An Edit to a Dormant Chunk is stored, and takes effect once the Chunk is active.
+- A Settled Chunk left behind by the moving edge wakes, and its gas flows on into the newly active Chunk.
+
 ## Done when
 
-- [ ] All seven tests exist and pass, and all earlier tests still pass. Earlier tests rely on the default focus at the origin.
+- [x] All seven tests exist and pass, and all earlier tests still pass. Earlier tests rely on the default focus at the origin.
 
 ## Scope boundary
 
