@@ -8,7 +8,11 @@ members = ["crates/sim", "crates/worldgen"]
 
 [dependencies]
 bevy = { version = "0.20.1", features = ["dynamic_linking"] }
+# Channels to and from the simulation thread; see `src/sim_bridge.rs` for why not `std::sync::mpsc`.
+crossbeam-channel = "0.5.17"
+ron = "0.12.3"
 sim = { path = "crates/sim" }
+worldgen = { path = "crates/worldgen" }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
@@ -16,6 +20,15 @@ opt-level = 1
 
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
+opt-level = 3
+
+# The same for the simulation and world generation, which `"*"` misses as workspace members. At
+# opt-level 1 a Tick of the generated world takes about 110 ms of its 200 ms, and a busy one
+# would overrun.
+[profile.dev.package.sim]
+opt-level = 3
+
+[profile.dev.package.worldgen]
 opt-level = 3
 
 # Enable more optimization in the release profile at the cost of compile time.

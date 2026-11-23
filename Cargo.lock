@@ -2096,7 +2096,10 @@ name = "blocks_not_included"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "crossbeam-channel",
+ "ron",
  "sim",
+ "worldgen",
 ]
 
 [[package]]

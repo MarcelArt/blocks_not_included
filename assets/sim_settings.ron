@@ -1,0 +1,28 @@
+// Tuning values for the simulation: `SimSettings` in crates/sim/src/settings.rs, which documents
+// each one and the range it must lie in. A value left out keeps its default.
+//
+// Every value here is its default, except `conduction_multiplier`.
+(
+    // The global speed-up for heat conduction. The default is 1.0, at which heat takes days to
+    // cross one Cell; 1000.0 is a first guess, to tune later.
+    conduction_multiplier: 1000.0,
+    // A Chunk is Settled after a Tick in which no Cell changed Element or Mass, and no
+    // temperature changed by more than this many kelvin.
+    settle_threshold_k: 0.01,
+    // Whether Settled Chunks skip work.
+    settled_chunks_enabled: true,
+    // How much of the Mass difference a lone pair of gas Cells evens out per Tick: above 0, at
+    // most 0.5.
+    gas_evening_out_fraction: 0.25,
+    // How much of the Mass difference a lone pair of sideways liquid neighbours evens out per
+    // Tick: above 0, at most 0.5.
+    liquid_spreading_fraction: 0.5,
+    // How much more a liquid Cell must hold than its neighbour before any of it spreads there,
+    // as a fraction of its Capacity: from 0 to 1.
+    liquid_spreading_threshold: 0.01,
+    // How many Chunks the Active Region spans along x, y and z.
+    active_region_chunks: (4, 2, 4),
+    // The fraction of its Mass that each gas Cell in the world's top layer escapes to space per
+    // Tick: from 0 to 1.
+    gas_escape_fraction: 0.01,
+)

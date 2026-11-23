@@ -39,6 +39,21 @@ The game runs the `Simulation` on a background thread at 5 Ticks per second. It 
 - **Shutdown.** Send `Shutdown` on `AppExit` and join the thread.
 - **Logging.** Log achieved Ticks per second and stats with `info!` every 5 seconds.
 
+### Decisions made during implementation
+
+- **Channels.** `crossbeam-channel` 0.5.17, which Bevy already depends on. Its `Receiver` is `Sync`, so it sits in the `SimBridge` resource without a `Mutex`, and its `recv_deadline` is stable; std's isn't.
+- **Render distance.** `RENDER_DISTANCE` reaches 6 Chunks horizontally and 3 vertically either way: 13 × 13 × 7 = 1,183 Chunks. `LoadAround.radius` is a `RenderDistance { horizontal, vertical }`, since a single `i32` can't hold both.
+- **Loading between Ticks.** The sim thread loads render distance one Chunk at a time, nearest the focus first, while it waits for the next Tick. It loads at least one Chunk per Tick even when Ticks overrun. On this laptop all 1,183 Chunks took about 15 s in a dev build, and the clock held 5.0 Ticks/s throughout.
+- **Chunks leave `WorldView`.** The sim thread tracks which Chunks the game holds. On `LoadAround`, Chunks beyond the new box leave `WorldView` and are listed in `WorldView::removed()` for that frame, which step 10 uses to despawn them. Changes beyond render distance aren't sent; a Chunk is sent whole when it comes back.
+- **Game crate API.** There is a new `src/lib.rs`; `main.rs` only builds the app.
+  - `sim_bridge`: `SimBridgePlugin::new` (for tests) and `SimBridgePlugin::sandbox` (the asset files and `WORLD_SEED`), `SimBridge::send(SimCommand)`, `SimReport`, `SimFocus`, `Elements` (the `ElementTable` resource, which derefs to it), `RENDER_DISTANCE`, `TICK_INTERVAL`.
+  - `world::WorldView`: `chunk`, `cell`, `chunks` and `len`, plus the per-frame record `changed()` and `removed()`.
+  - Schedules: updates are drained in `First`. `SimFocus` is sent in `PostUpdate`, so a change made in `Update` goes out the same frame. Shutdown on `AppExit` runs in `Last`.
+- **Commands.** `Step` runs a Tick only while paused. `Resume` restarts the clock one interval later. Chunks changed by an Edit are sent straight away, so Edits show while paused.
+- **Initial focus.** Just above the highest solid or liquid Cell at x = z = 0, found by generating that column's Chunks from the top down. If there is none, it is at y = 0.
+- **Dev profile.** `sim` and `worldgen` are now built at opt-level 3 in dev builds too, because the `"*"` override skips workspace members. A Tick of the generated world went from about 110 ms to 90 ms under `cargo run`.
+- **Memory.** About 1.3 GB resident once render distance is full: roughly 465 MB of Chunks in the simulation, and the same again in `WorldView`. A later change could share them by having `sim` store Chunks as `Arc<[Cell]>` with copy-on-write.
+
 ## Seams and tests
 
 **Seam:** `SimBridgePlugin` in a headless `App` (`MinimalPlugins`), configured with a tiny `ElementTable` and an all-Vacuum source. Make the plugin constructible from those parts so tests don't need the asset files. Use generous timeouts, since threads are involved.
@@ -47,10 +62,12 @@ The game runs the `Simulation` on a background thread at 5 Ticks per second. It 
 2. `Pause` stops the Tick count from advancing, and `Step` advances it by exactly one.
 3. Dropping the `App` shuts the sim thread down; the test finishes without hanging.
 
+Added at the same seam, in `tests/sim_bridge.rs`: the initial focus sits just above the surface; Chunks leave `WorldView` beyond render distance and arrive within it; an `AppExit` shuts the thread down. A unit test in `src/sim_bridge.rs` checks that `assets/sim_settings.ron` holds the defaults except `conduction_multiplier`.
+
 ## Done when
 
-- [ ] All three tests pass.
-- [ ] `cargo run` starts, logs about 5 Ticks/s with stats, and exits cleanly when the window is closed.
+- [x] All three tests pass.
+- [x] `cargo run` starts, logs about 5 Ticks/s with stats, and exits cleanly when the window is closed. Checked under X11 by closing the window with `xdotool windowquit`: 5.0 Ticks/s, then "the simulation thread has shut down" and a clean exit.
 
 ## Scope boundary
 
