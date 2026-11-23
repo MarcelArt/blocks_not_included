@@ -15,7 +15,7 @@ Give these to an agent one at a time, in order, for example: "implement docs/pla
 | [08 Performance](08-performance.md): busy 76 ms, settled 44 ms (target 10 ms missed: the world never comes to rest; a region at rest takes 0.07 ms), per Tick on 3 threads | sim, worldgen | done |
 | [09 Sim thread bridge](09-sim-bridge.md) | game | done |
 | [10 Rendering solid Cells](10-solid-rendering.md) | game | done |
-| [11 First-person controller](11-player-controller.md) | game | todo |
+| [11 First-person controller](11-player-controller.md) | game | done |
 | [12 God tools and palette](12-god-tools.md) | game | todo |
 | [13 Liquids and gases on screen](13-fluid-rendering.md) | game | todo |
 | [14 Overlays and crosshair readout](14-overlays-readout.md) | game | todo |

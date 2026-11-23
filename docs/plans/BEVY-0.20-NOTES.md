@@ -35,6 +35,17 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **Frame-time measurements.** The default `WinitSettings::game()` caps an unfocused window at 60 Hz. Insert `WinitSettings::continuous()` before measuring, or a window without focus looks slow.
 - **Light levels.** See step 10's lighting decision for values that keep flat colours readable under the default exposure.
 
+## Found in step 11
+
+- **Cursor capture.** `CursorOptions` is a component of its own on the window entity, not a field of `Window`. Use `Single<&mut CursorOptions, With<PrimaryWindow>>` and set `grab_mode` and `visible`. On X11, `CursorGrabMode::Locked` falls back to `Confined`.
+- **Mouse look.** The `bevy::input::mouse::AccumulatedMouseMotion` resource holds the whole movement since the last frame, in `delta`. Don't scale it by time.
+- **`Single` that stops matching.** Once its filter stops matching, a system taking `Single<…>` is skipped without a warning. Step 11 relies on this for its `With<AwaitingSpawn>` spawn system.
+- **The `free_camera` feature is gone,** along with step 10's temporary camera.
+- **Agent checks in a real window.**
+  - A system in `PreUpdate`, ordered `.after(bevy::input::InputSystems)`, can `press` and `release` keys on `ButtonInput<KeyCode>`. Every game system then sees them as held.
+  - `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))`, from `bevy::render::view::screenshot`, saves a frame.
+- **Vulkan loader errors.** Two `ERROR wgpu_hal::vulkan::instance … liblsfg-vk-layer.so` lines at startup come from a Vulkan layer installed on this laptop, not from the game. They are harmless.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

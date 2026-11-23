@@ -460,7 +460,7 @@ impl SimThread {
     fn handle(&mut self, command: SimCommand) -> ControlFlow<()> {
         match command {
             SimCommand::Edit(edit) => self.sim.apply(edit),
-            SimCommand::Focus(pos) => self.sim.focus_on(pos),
+            SimCommand::Focus(pos) => self.focus_on(pos),
             SimCommand::LoadAround { center, radius } => self.show_around(center, radius),
             SimCommand::Pause => self.paused = true,
             SimCommand::Resume if self.paused => {
@@ -472,6 +472,21 @@ impl SimThread {
             SimCommand::Shutdown => return ControlFlow::Break(()),
         }
         ControlFlow::Continue(())
+    }
+
+    /// Moves the focus to `pos`, and logs where the Active Region goes if it moves.
+    fn focus_on(&mut self, pos: CellPos) {
+        let before = self.sim.active_region();
+        self.sim.focus_on(pos);
+        let region = self.sim.active_region();
+        if region != before {
+            let (min, max) = (region.min(), region.max());
+            info!(
+                "the Active Region moved to Chunks ({}, {}, {}) to ({}, {}, {}), following the \
+                 focus to ({}, {}, {})",
+                min.x, min.y, min.z, max.x, max.y, max.z, pos.x, pos.y, pos.z,
+            );
+        }
     }
 
     fn tick(&mut self) {

@@ -1,11 +1,10 @@
-//! The sky and the sun, and a temporary camera to look at the world with.
+//! The sky and the sun. The camera is the player's (`crate::player`).
 
-use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use bevy::light::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
 use sim::CHUNK_SIZE;
 
-use crate::sim_bridge::{RENDER_DISTANCE, SimFocus};
+use crate::sim_bridge::RENDER_DISTANCE;
 
 /// A clear daytime blue.
 const SKY: Color = Color::srgb(0.55, 0.75, 0.95);
@@ -19,7 +18,7 @@ const SKY: Color = Color::srgb(0.55, 0.75, 0.95);
 /// The sun's illuminance, in lux: about 0.65 of a top face's colour.
 const SUN_ILLUMINANCE: f32 = 2_500.0;
 
-/// Which way sunlight travels: high, and from the side the camera starts on.
+/// Which way sunlight travels: high, and from behind the player as they start out.
 const SUN_DIRECTION: Vec3 = Vec3::new(0.5, -1.0, 0.3);
 
 /// Light from the sky, which also reaches faces the sun doesn't: slightly blue.
@@ -28,7 +27,7 @@ const SKY_LIGHT: Color = Color::srgb(0.8, 0.87, 1.0);
 /// The sky light's brightness: about 0.35 of a face's colour.
 const SKY_LIGHT_BRIGHTNESS: f32 = 450.0;
 
-/// The sky colour, the sun, and a free-flying camera that starts above the focus.
+/// The sky colour and the sun.
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
@@ -39,8 +38,7 @@ impl Plugin for ScenePlugin {
                 brightness: SKY_LIGHT_BRIGHTNESS,
                 ..default()
             })
-            .add_plugins(FreeCameraPlugin)
-            .add_systems(Startup, (spawn_sun, spawn_camera));
+            .add_systems(Startup, spawn_sun);
     }
 }
 
@@ -59,22 +57,5 @@ fn spawn_sun(mut commands: Commands) {
             ..default()
         }
         .build(),
-    ));
-}
-
-/// Temporary, until the first-person controller (step 11) replaces it: a camera to fly around
-/// with. Hold the right mouse button (or press M) to look around; WASD moves, Q and E go down and
-/// up, Shift runs, and the scroll wheel changes speed.
-fn spawn_camera(mut commands: Commands, focus: Res<SimFocus>) {
-    let focus = IVec3::new(focus.0.x, focus.0.y, focus.0.z).as_vec3();
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_translation(focus + Vec3::new(-40.0, 30.0, -40.0))
-            .looking_at(focus, Vec3::Y),
-        FreeCamera {
-            walk_speed: 10.0,
-            run_speed: 40.0,
-            ..default()
-        },
     ));
 }

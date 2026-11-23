@@ -7,8 +7,7 @@ edition = "2024"
 members = ["crates/sim", "crates/worldgen"]
 
 [dependencies]
-# `free_camera`: the temporary fly camera of step 10, until step 11's player controller replaces it.
-bevy = { version = "0.20.1", features = ["dynamic_linking", "free_camera"] }
+bevy = { version = "0.20.1", features = ["dynamic_linking"] }
 binary-greedy-meshing = "0.6.4"
 # Channels to and from the simulation thread; see `src/sim_bridge.rs` for why not `std::sync::mpsc`.
 crossbeam-channel = "0.5.17"

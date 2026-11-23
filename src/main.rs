@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use blocks_not_included::player::PlayerPlugin;
 use blocks_not_included::render::{ChunkMeshPlugin, ScenePlugin};
 use blocks_not_included::sim_bridge::SimBridgePlugin;
 
@@ -9,6 +10,7 @@ fn main() {
             SimBridgePlugin::sandbox(),
             ChunkMeshPlugin,
             ScenePlugin,
+            PlayerPlugin,
         ))
         .run();
 }
