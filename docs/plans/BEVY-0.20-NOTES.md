@@ -28,6 +28,13 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **Extraction:** the `ExtractComponent` and `ExtractResource` derives now need `#[extract_app(RenderApp)]`.
 - **Buffered events:** these are `Message`s (`MessageWriter` / `MessageReader`), separate from observer `Event`s. Confirm against 0.20 before using them.
 
+## Found in step 10
+
+- **Ambient light** is the `GlobalAmbientLight` resource. `AmbientLight` is now a per-camera component that overrides it.
+- **Free camera.** `bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin}` needs Bevy's `free_camera` feature. Step 10 enabled it for its temporary camera.
+- **Frame-time measurements.** The default `WinitSettings::game()` caps an unfocused window at 60 Hz. Insert `WinitSettings::continuous()` before measuring, or a window without focus looks slow.
+- **Light levels.** See step 10's lighting decision for values that keep flat colours readable under the default exposure.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

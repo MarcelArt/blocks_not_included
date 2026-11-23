@@ -585,7 +585,8 @@ impl ChunkBox {
     }
 }
 
-fn distance_squared(a: ChunkPos, b: ChunkPos) -> i64 {
+/// The square of the straight-line distance between two Chunks, counted in Chunks.
+pub(crate) fn distance_squared(a: ChunkPos, b: ChunkPos) -> i64 {
     let d = |a: i32, b: i32| i64::from(a - b).pow(2);
     d(a.x, b.x) + d(a.y, b.y) + d(a.z, b.z)
 }
