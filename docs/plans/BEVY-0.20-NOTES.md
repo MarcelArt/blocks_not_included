@@ -97,6 +97,16 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **Messages in tests.** To read a game `Message` from a test that drives `app.update()`, add a system that copies it into a resource: messages are cleared after two frames.
 - **egui.** `ui.add_enabled(enabled, egui::Button::new(label))` greys out a button.
 
+## Found while relighting caves (after step 15)
+
+- **Sky light that depends on the normal.** An `EnvironmentMapLight` on the camera lights every PBR material by its surface normal.
+  - `EnvironmentMapLight::hemispherical_gradient(images, top, mid, bottom)` builds one with the same shade on all four sides.
+  - For a different shade per side, build a 1×1 `Image` with 6 layers and `texture_view_descriptor: Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), .. })`. Its layers are in wgpu's order: +x, −x, +y, −y, +z, −z. `Rgba8Unorm` texels work.
+  - Diffuse light is about texel × `intensity`, on the same scale as `GlobalAmbientLight::brightness`.
+  - `GlobalAmbientLight` still adds on top, so set it to `GlobalAmbientLight::NONE`.
+- **Texture types** (`Extent3d`, `TextureDimension`, `TextureFormat`, `TextureViewDescriptor`, `TextureViewDimension`) are under `bevy::render::render_resource`.
+- **Point lights.** The shadow switch is `PointLight::shadow_maps_enabled`. `EntityCommands::with_child(bundle)` hangs one from the camera.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

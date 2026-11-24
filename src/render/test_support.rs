@@ -118,10 +118,43 @@ pub struct Quad {
     pub color: [f32; 4],
 }
 
-/// The quads of `geometry`, sorted. Checks, for every quad, that its four corners share one
-/// normal and colour, that it is flat along that normal, and that both its triangles wind
-/// counter-clockwise seen from where the normal points, as Bevy needs to show them.
+/// One quad of a [`ChunkGeometry`] whose corners may differ in colour: the box its corners span,
+/// and each corner's position and colour, sorted by position.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct ShadedQuad {
+    pub normal: [f32; 3],
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    pub corners: [([f32; 3], [f32; 4]); 4],
+}
+
+/// The quads of `geometry`, sorted, each in a single colour. Checks everything
+/// [`shaded_quads`] does, and that every quad's four corners share one colour.
 pub fn quads_of(geometry: &ChunkGeometry) -> Vec<Quad> {
+    let mut quads: Vec<Quad> = shaded_quads(geometry)
+        .into_iter()
+        .map(|quad| {
+            let color = quad.corners[0].1;
+            assert!(
+                quad.corners.iter().all(|&(_, c)| c == color),
+                "{quad:?} is shaded"
+            );
+            Quad {
+                normal: quad.normal,
+                min: quad.min,
+                max: quad.max,
+                color,
+            }
+        })
+        .collect();
+    quads.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    quads
+}
+
+/// The quads of `geometry`, sorted. Checks, for every quad, that its four corners share one
+/// normal, that it is flat along that normal, and that both its triangles wind
+/// counter-clockwise seen from where the normal points, as Bevy needs to show them.
+pub fn shaded_quads(geometry: &ChunkGeometry) -> Vec<ShadedQuad> {
     let vertices = geometry.positions.len();
     assert_eq!(vertices % 4, 0);
     assert_eq!(geometry.normals.len(), vertices);
@@ -145,28 +178,29 @@ pub fn quads_of(geometry: &ChunkGeometry) -> Vec<Quad> {
         );
     }
 
-    let mut quads: Vec<Quad> = (0..vertices / 4)
+    let mut quads: Vec<ShadedQuad> = (0..vertices / 4)
         .map(|quad| {
-            let corners = quad * 4..quad * 4 + 4;
-            let normal = geometry.normals[quad * 4];
-            let color = geometry.colors[quad * 4];
+            let first = quad * 4;
+            let normal = geometry.normals[first];
             assert!(
-                geometry.normals[corners.clone()]
+                geometry.normals[first..first + 4]
                     .iter()
                     .all(|&n| n == normal)
             );
-            assert!(geometry.colors[corners.clone()].iter().all(|&c| c == color));
-            let positions = &geometry.positions[corners];
+            let mut corners: [([f32; 3], [f32; 4]); 4] = std::array::from_fn(|i| {
+                (geometry.positions[first + i], geometry.colors[first + i])
+            });
+            corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let min = [0, 1, 2].map(|axis| {
-                positions
+                corners
                     .iter()
-                    .map(|p| p[axis])
+                    .map(|(p, _)| p[axis])
                     .fold(f32::INFINITY, f32::min)
             });
             let max = [0, 1, 2].map(|axis| {
-                positions
+                corners
                     .iter()
-                    .map(|p| p[axis])
+                    .map(|(p, _)| p[axis])
                     .fold(f32::NEG_INFINITY, f32::max)
             });
             let flat_axis = normal.iter().position(|&n| n != 0.0).unwrap();
@@ -174,16 +208,42 @@ pub fn quads_of(geometry: &ChunkGeometry) -> Vec<Quad> {
                 min[flat_axis], max[flat_axis],
                 "quad is flat along its normal"
             );
-            Quad {
+            ShadedQuad {
                 normal,
                 min,
                 max,
-                color,
+                corners,
             }
         })
         .collect();
     quads.sort_by(|a, b| a.partial_cmp(b).unwrap());
     quads
+}
+
+/// The quad with `normal` spanning `min` to `max`, which is flat along the normal, with each
+/// corner in the colour `color` gives its position.
+pub fn expected_shaded_quad(
+    normal: [f32; 3],
+    min: [f32; 3],
+    max: [f32; 3],
+    color: impl Fn([f32; 3]) -> [f32; 4],
+) -> ShadedQuad {
+    let flat_axis = normal.iter().position(|&n| n != 0.0).unwrap();
+    let [a, b] = [(flat_axis + 1) % 3, (flat_axis + 2) % 3];
+    let mut corners =
+        [(false, false), (true, false), (false, true), (true, true)].map(|(a_max, b_max)| {
+            let mut corner = min;
+            corner[a] = if a_max { max[a] } else { min[a] };
+            corner[b] = if b_max { max[b] } else { min[b] };
+            (corner, color(corner))
+        });
+    corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ShadedQuad {
+        normal,
+        min,
+        max,
+        corners,
+    }
 }
 
 /// The quads `expected` lists as `(normal, min, max)`, all in `color`, sorted as [`quads_of`]

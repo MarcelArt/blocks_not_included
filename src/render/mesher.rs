@@ -4,12 +4,17 @@
 //! layer of Cells that touches it from each face neighbour, so that a face against a solid
 //! neighbour is left out. For solids, a value of 0 means "not solid"; any other value is the
 //! Cell's [`ElementId::index`] + 1. [`mesh_greedy`] lets the Overlays choose values of their own.
+//!
+//! Solid faces are darkened at each corner by the solid Cells around it in front of the face
+//! (ambient occlusion), so creases, corners and the foot of every wall show even where the sun
+//! doesn't reach, between faces of one colour. A greedy quad is split only where that shading
+//! changes across it.
 
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
-use binary_greedy_meshing::{Face, Mesher, Quad};
+use binary_greedy_meshing::{Face, Mesher, Quad, Vertex};
 use sim::{CHUNK_SIZE, Cell, ChunkPos, ElementId, ElementTable, Phase};
 
 /// Cells along each side of the padded cube: the Chunk plus one layer on either side.
@@ -25,9 +30,45 @@ const FACE_NEIGHBOURS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
+/// The 26 Chunks that touch a Chunk by a face, an edge or a corner, as offsets: x, then y, then
+/// z, each from −1 to 1, leaving out the Chunk itself.
+const NEIGHBOURS: [(i32, i32, i32); 26] = {
+    let mut offsets = [(0, 0, 0); 26];
+    let (mut i, mut slot) = (0, 0);
+    while i < 27 {
+        if i != 13 {
+            offsets[slot] = (i / 9 - 1, i / 3 % 3 - 1, i % 3 - 1);
+            slot += 1;
+        }
+        i += 1;
+    }
+    offsets
+};
+
+/// Where the neighbour at `offset` lies in [`NEIGHBOURS`].
+fn neighbour_slot((dx, dy, dz): (i32, i32, i32)) -> usize {
+    let i = (dx + 1) * 9 + (dy + 1) * 3 + (dz + 1);
+    // The Chunk itself, at 13, is left out.
+    (if i > 13 { i - 1 } else { i }) as usize
+}
+
+/// How much of its colour a corner of a solid face shows at each occlusion level: from 0, closed
+/// in on both sides by solid Cells in front of the face, to 3, with none around it.
+const OCCLUSION_SHADES: [f32; 4] = [0.35, 0.55, 0.76, 1.0];
+
+/// The occlusion level of a corner with no solid Cell around it.
+const UNOCCLUDED: u8 = 3;
+
 /// The Chunks that share a face with the Chunk at `pos`.
 pub(crate) fn face_neighbours(pos: ChunkPos) -> [ChunkPos; 6] {
     FACE_NEIGHBOURS.map(|(dx, dy, dz)| ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
+}
+
+/// The Chunks that touch the Chunk at `pos`, by a face, an edge or a corner. Its solid mesh
+/// depends on all of them: the faces along its border on its face neighbours, and the shading of
+/// those faces' corners on the others too.
+pub(crate) fn neighbours(pos: ChunkPos) -> [ChunkPos; 26] {
+    NEIGHBOURS.map(|(dx, dy, dz)| ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
 }
 
 /// The colour each solid Element is drawn in, by [`ElementId::index`]. Every other Element is
@@ -67,22 +108,22 @@ impl SolidColors {
     }
 }
 
-/// What meshing a Chunk reads: its own Cells, and those of each face neighbour that is loaded.
+/// What meshing a Chunk reads: its own Cells, and those of each neighbour that is loaded.
 pub struct ChunkNeighbourhood {
     cells: Arc<[Cell]>,
-    /// In [`FACE_NEIGHBOURS`] order. `None` where the neighbour isn't loaded.
-    neighbours: [Option<Arc<[Cell]>>; 6],
+    /// In [`NEIGHBOURS`] order. `None` where the neighbour isn't loaded.
+    neighbours: [Option<Arc<[Cell]>>; 26],
 }
 
 impl ChunkNeighbourhood {
-    /// The Chunk at `pos` and its face neighbours, as `chunk` finds them. `None` if `chunk` lacks
+    /// The Chunk at `pos` and its 26 neighbours, as `chunk` finds them. `None` if `chunk` lacks
     /// the Chunk at `pos` itself.
     pub fn gather(
         pos: ChunkPos,
         mut chunk: impl FnMut(ChunkPos) -> Option<Arc<[Cell]>>,
     ) -> Option<Self> {
         let cells = chunk(pos)?;
-        let neighbours = face_neighbours(pos).map(chunk);
+        let neighbours = neighbours(pos).map(chunk);
         Some(Self { cells, neighbours })
     }
 
@@ -91,9 +132,13 @@ impl ChunkNeighbourhood {
         &self.cells
     }
 
+    /// The Cells of the neighbour at `offset`, if it is loaded.
+    fn neighbour(&self, offset: (i32, i32, i32)) -> Option<&Arc<[Cell]>> {
+        self.neighbours[neighbour_slot(offset)].as_ref()
+    }
+
     /// The Cell at `[x, y, z]` relative to the Chunk's origin, which may lie one Cell outside the
-    /// Chunk along one axis, in a face neighbour. `None` if that neighbour isn't loaded, and for a
-    /// position in an edge or corner neighbour, which isn't gathered.
+    /// Chunk along any of the axes, in a neighbour. `None` if that neighbour isn't loaded.
     pub fn cell(&self, [x, y, z]: [i32; 3]) -> Option<Cell> {
         let size = CHUNK_SIZE as i32;
         let inside = |c: i32| (0..size).contains(&c);
@@ -114,9 +159,7 @@ impl ChunkNeighbourhood {
                 0
             }
         };
-        let offset = (step(x), step(y), step(z));
-        let neighbour = FACE_NEIGHBOURS.iter().position(|&o| o == offset)?;
-        let cells = self.neighbours[neighbour].as_ref()?;
+        let cells = self.neighbour((step(x), step(y), step(z)))?;
         let local = [x, y, z].map(|c| c.rem_euclid(size) as usize);
         Some(cells[chunk_index(local)])
     }
@@ -134,14 +177,15 @@ pub struct ChunkGeometry {
 }
 
 /// Meshes the solid Cells of a Chunk. Faces between two solid Cells are left out, and so are
-/// faces against a solid Cell of a neighbour Chunk; a missing neighbour counts as not solid.
+/// faces against a solid Cell of a neighbour Chunk; a missing neighbour counts as not solid. Each
+/// corner of a face is darkened by the solid Cells around it in front of the face.
 pub fn mesh_solids(neighbourhood: &ChunkNeighbourhood, colors: &SolidColors) -> ChunkGeometry {
-    mesh_greedy(
-        neighbourhood,
-        |cell| colors.voxel(cell.element),
-        Faces::Opaque,
-        |voxel| colors.of_voxel(voxel),
-    )
+    let voxel = |cell: Cell| colors.voxel(cell.element);
+    let Some((padded, quads)) = greedy_quads(neighbourhood, voxel, Faces::Opaque) else {
+        return ChunkGeometry::default();
+    };
+    let occluders = Occluders::new(&padded, neighbourhood, voxel);
+    ChunkGeometry::from_quads(&quads, |voxel| colors.of_voxel(voxel), Some(&occluders))
 }
 
 /// Which faces between two drawn Cells [`mesh_greedy`] leaves out.
@@ -163,9 +207,23 @@ pub fn mesh_greedy(
     faces: Faces,
     color: impl Fn(u16) -> [f32; 4],
 ) -> ChunkGeometry {
+    match greedy_quads(neighbourhood, voxel, faces) {
+        Some((_, quads)) => ChunkGeometry::from_quads(&quads, color, None),
+        None => ChunkGeometry::default(),
+    }
+}
+
+/// The greedy mesher's quads for the Cells of a Chunk that `voxel` gives a value other than 0,
+/// for each face direction in [`Face`] order, with the padded cube they were meshed from. `None`
+/// if there are no such Cells.
+fn greedy_quads(
+    neighbourhood: &ChunkNeighbourhood,
+    voxel: impl Fn(Cell) -> u16,
+    faces: Faces,
+) -> Option<(PaddedChunk, [Vec<Quad>; 6])> {
     if neighbourhood.cells.iter().all(|&cell| voxel(cell) == 0) {
         // Such as a Chunk of solids high in the Atmosphere: about half of render distance.
-        return ChunkGeometry::default();
+        return None;
     }
     let padded = PaddedChunk::new(neighbourhood, voxel);
     let mut mesher = Mesher::<CHUNK_SIZE>::new();
@@ -175,7 +233,7 @@ pub fn mesh_greedy(
         Faces::Translucent => (&none, &padded.columns),
     };
     mesher.fast_mesh(&padded.voxels, opaque, translucent);
-    ChunkGeometry::from_quads(&mesher.quads, color)
+    Some((padded, mesher.quads))
 }
 
 impl ChunkGeometry {
@@ -197,28 +255,330 @@ impl ChunkGeometry {
     }
 
     /// `quads` lists the mesher's quads for each face direction, in [`Face`] order. `color` gives
-    /// the colour of a quad's value.
-    fn from_quads(quads: &[Vec<Quad>; 6], color: impl Fn(u16) -> [f32; 4]) -> Self {
-        let count = quads.iter().map(Vec::len).sum();
+    /// the colour of a quad's value. With `occluders`, each corner is darkened by the solid Cells
+    /// around it in front of its face, and a quad is split where that changes across it.
+    fn from_quads(
+        quads: &[Vec<Quad>; 6],
+        color: impl Fn(u16) -> [f32; 4],
+        occluders: Option<&Occluders>,
+    ) -> Self {
+        let count = quads.iter().map(Vec::len).sum::<usize>();
         let mut geometry = Self {
             positions: Vec::with_capacity(count * 4),
             normals: Vec::with_capacity(count * 4),
             colors: Vec::with_capacity(count * 4),
-            indices: binary_greedy_meshing::indices(count),
+            indices: Vec::with_capacity(count * 6),
         };
+        let mut scratch = Scratch::default();
         for (face, quads) in (0..6).map(Face::from).zip(quads) {
-            let normal = face.n().map(|n| n as f32);
+            let side = Side::of(face);
             for &quad in quads {
                 let voxel = u16::try_from(quad.voxel_id()).expect("values are u16");
                 let color = color(voxel);
-                for vertex in face.vertices_packed(quad) {
-                    geometry.positions.push(vertex.xyz().map(|c| c as f32));
-                    geometry.normals.push(normal);
-                    geometry.colors.push(color);
+                let rect = side.rect(face.vertices_packed(quad));
+                match occluders {
+                    Some(occluders) => geometry.push_occluded(rect, color, occluders, &mut scratch),
+                    None => geometry.push_rect(rect, color, [UNOCCLUDED; 4]),
                 }
             }
         }
         geometry
+    }
+
+    /// Adds `rect`, split into as few quads as keep each one's shading exact: within each, the
+    /// occlusion at every Cell corner is what interpolating between the quad's own corners gives.
+    fn push_occluded(
+        &mut self,
+        rect: Rect,
+        color: [f32; 4],
+        occluders: &Occluders,
+        scratch: &mut Scratch,
+    ) {
+        let Rect {
+            u: [u0, u1],
+            v: [v0, v1],
+            ..
+        } = rect;
+        let (width, height) = ((u1 - u0) as usize, (v1 - v0) as usize);
+        let Scratch {
+            solid,
+            levels,
+            done,
+        } = scratch;
+
+        // Which Cells are solid in the layer the rectangle looks out into, from one before it to
+        // one past it along u and v, u fastest. Those right in front of it are all open, or it
+        // would show no face there, so only the ring of Cells around them is looked up.
+        let span = width + 2;
+        solid.clear();
+        solid.resize(span * (height + 2), false);
+        let mut any_solid = false;
+        let mut look_up = |i: usize, j: usize| {
+            let (u, v) = (u0 - 1 + i as i32, v0 - 1 + j as i32);
+            let is_solid = occluders.in_front(rect.side, rect.plane, u, v);
+            solid[j * span + i] = is_solid;
+            any_solid |= is_solid;
+        };
+        for i in 0..span {
+            look_up(i, 0);
+            look_up(i, height + 1);
+        }
+        for j in 1..=height {
+            look_up(0, j);
+            look_up(width + 1, j);
+        }
+        if !any_solid {
+            // Nearly every quad in the open.
+            self.push_rect(rect, color, [UNOCCLUDED; 4]);
+            return;
+        }
+
+        // The occlusion at every Cell corner of the rectangle, u fastest. The four Cells around
+        // the corner `i` along u and `j` along v lie at `i` and `i + 1`, and `j` and `j + 1`, in
+        // `solid`.
+        levels.clear();
+        for j in 0..=height {
+            for i in 0..=width {
+                let at = |i: usize, j: usize| solid[j * span + i];
+                levels.push(occlusion([
+                    at(i, j),
+                    at(i + 1, j),
+                    at(i + 1, j + 1),
+                    at(i, j + 1),
+                ]));
+            }
+        }
+
+        // The occlusion at the corners of the Cell-sized face `i` along u and `j` along v from
+        // the rectangle's corner, in the order `push_rect` takes them.
+        let corners = |i: usize, j: usize| {
+            let at = |i: usize, j: usize| levels[j * (width + 1) + i];
+            [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]
+        };
+        // Greedy again, over the Cell-sized faces: merge runs whose corners match. Neighbours
+        // share corners, so matching faces have the same occlusion all along the run, and
+        // interpolating between its ends gives every corner within it exactly.
+        done.clear();
+        done.resize(width * height, false);
+        for j in 0..height {
+            for i in 0..width {
+                if done[j * width + i] {
+                    continue;
+                }
+                let these = corners(i, j);
+                let mut w = 1;
+                while i + w < width && !done[j * width + i + w] && corners(i + w, j) == these {
+                    w += 1;
+                }
+                let mut h = 1;
+                while j + h < height
+                    && (i..i + w).all(|k| !done[(j + h) * width + k] && corners(k, j + h) == these)
+                {
+                    h += 1;
+                }
+                for row in j..j + h {
+                    done[row * width + i..row * width + i + w].fill(true);
+                }
+                let (i, j, w, h) = (i as i32, j as i32, w as i32, h as i32);
+                let part = Rect {
+                    u: [u0 + i, u0 + i + w],
+                    v: [v0 + j, v0 + j + h],
+                    ..rect
+                };
+                self.push_rect(part, color, these);
+            }
+        }
+    }
+
+    /// Adds one quad covering `rect`, in `color` darkened at each corner by its occlusion level
+    /// in `levels`: at (u0, v0), (u1, v0), (u1, v1) and (u0, v1).
+    fn push_rect(&mut self, rect: Rect, color: [f32; 4], levels: [u8; 4]) {
+        let Rect {
+            side,
+            plane,
+            u: [u0, u1],
+            v: [v0, v1],
+        } = rect;
+        let [u_axis, v_axis] = side.along();
+        let corner = |u: i32, v: i32| {
+            let mut position = [plane as f32; 3];
+            position[u_axis] = u as f32;
+            position[v_axis] = v as f32;
+            position
+        };
+        // Counter-clockwise seen from the positive end of the axis, since u × v points that way.
+        let mut corners = [
+            (corner(u0, v0), levels[0]),
+            (corner(u1, v0), levels[1]),
+            (corner(u1, v1), levels[2]),
+            (corner(u0, v1), levels[3]),
+        ];
+        if !side.positive {
+            // Counter-clockwise seen from the negative end.
+            corners.reverse();
+        }
+
+        let first = u32::try_from(self.positions.len()).expect("fewer than 2³² vertices");
+        let normal = side.normal();
+        let [r, g, b, alpha] = color;
+        for (position, level) in corners {
+            let shade = OCCLUSION_SHADES[usize::from(level)];
+            self.positions.push(position);
+            self.normals.push(normal);
+            self.colors.push([r * shade, g * shade, b * shade, alpha]);
+        }
+        // Two triangles, split along the diagonal between the less occluded pair of corners: a
+        // dark corner then darkens only its own triangle, rather than a band across the quad.
+        let [a, b, c, d] = corners.map(|(_, level)| u32::from(level));
+        let triangles = if a + c >= b + d {
+            [0, 1, 2, 0, 2, 3]
+        } else {
+            [1, 2, 3, 1, 3, 0]
+        };
+        self.indices.extend(triangles.map(|i| first + i));
+    }
+}
+
+/// Working space for [`ChunkGeometry::push_occluded`], reused from one quad to the next.
+#[derive(Default)]
+struct Scratch {
+    solid: Vec<bool>,
+    levels: Vec<u8>,
+    done: Vec<bool>,
+}
+
+/// How closed in a corner of a face is, by which of the four Cells that meet there, in the layer
+/// the face looks out into, are solid: from 3, with none of them, to 0. They are listed in order
+/// around the corner, so the first and third, and the second and fourth, lie across it from each
+/// other. At least one is open: the Cell in front of the face.
+fn occlusion(solid: [bool; 4]) -> u8 {
+    let [a, b, c, d] = solid;
+    match solid.into_iter().filter(|&solid| solid).count() {
+        0 => UNOCCLUDED,
+        1 => 2,
+        2 if !(a && c || b && d) => 1,
+        // Two across the corner from each other close it in as much as three do: they stand on
+        // both sides of the open Cell in front of the face.
+        _ => 0,
+    }
+}
+
+/// Which way a face points: along `axis` (0 for x, 1 for y, 2 for z), to its positive or
+/// negative end.
+#[derive(Clone, Copy, Debug)]
+struct Side {
+    axis: usize,
+    positive: bool,
+}
+
+impl Side {
+    fn of(face: Face) -> Self {
+        let n = face.n();
+        let axis = n.iter().position(|&c| c != 0).expect("a face has a normal");
+        Self {
+            axis,
+            positive: n[axis] > 0,
+        }
+    }
+
+    fn normal(self) -> [f32; 3] {
+        let mut normal = [0.0; 3];
+        normal[self.axis] = if self.positive { 1.0 } else { -1.0 };
+        normal
+    }
+
+    /// The two axes a face on this side spans, u then v, in the order that makes u × v point to
+    /// the positive end of `axis`.
+    fn along(self) -> [usize; 2] {
+        [(self.axis + 1) % 3, (self.axis + 2) % 3]
+    }
+
+    /// The rectangle a quad's vertices, as the mesher gives them, span.
+    fn rect(self, vertices: [Vertex; 4]) -> Rect {
+        let positions = vertices.map(|vertex| vertex.xyz().map(|c| c as i32));
+        let span = |axis: usize| {
+            let along = positions.map(|position| position[axis]);
+            [along.into_iter().min(), along.into_iter().max()].map(Option::unwrap)
+        };
+        let [u_axis, v_axis] = self.along();
+        Rect {
+            side: self,
+            plane: span(self.axis)[0],
+            u: span(u_axis),
+            v: span(v_axis),
+        }
+    }
+}
+
+/// A face rectangle, relative to the Chunk's origin: which way it points, where it lies along
+/// that axis, and the Cell corners it runs between along the two others ([`Side::along`]).
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    side: Side,
+    plane: i32,
+    u: [i32; 2],
+    v: [i32; 2],
+}
+
+/// Which Cells of a Chunk's padded cube are solid, including those along its edges and at its
+/// corners, which the mesher's own padding leaves out: what darkens the corners of solid faces.
+struct Occluders {
+    /// One `u64` per (x, y) column of the padded cube, with bit z set where the Cell is solid, as
+    /// in [`PaddedChunk::columns`].
+    columns: Box<[u64]>,
+}
+
+impl Occluders {
+    /// The Cells `voxel` gives a value other than 0. `padded` holds those of the Chunk and its
+    /// face neighbours already.
+    fn new(
+        padded: &PaddedChunk,
+        neighbourhood: &ChunkNeighbourhood,
+        voxel: impl Fn(Cell) -> u16,
+    ) -> Self {
+        let mut columns = padded.columns.clone();
+        let size = CHUNK_SIZE as i32;
+        let span = |offset: i32| match offset {
+            -1 => -1..0,
+            1 => size..size + 1,
+            _ => 0..size,
+        };
+        let edge_or_corner = |&(dx, dy, dz): &(i32, i32, i32)| {
+            [dx, dy, dz].into_iter().filter(|&d| d != 0).count() >= 2
+        };
+        for (dx, dy, dz) in NEIGHBOURS.into_iter().filter(edge_or_corner) {
+            for x in span(dx) {
+                for y in span(dy) {
+                    for z in span(dz) {
+                        if neighbourhood
+                            .cell([x, y, z])
+                            .is_some_and(|cell| voxel(cell) != 0)
+                        {
+                            let [x, y, z] = [x, y, z].map(|c| (c + 1) as usize);
+                            columns[x + y * PADDED] |= 1 << z;
+                        }
+                    }
+                }
+            }
+        }
+        Self { columns }
+    }
+
+    /// Whether the Cell at `[x, y, z]` relative to the Chunk's origin, each from −1 to
+    /// `CHUNK_SIZE`, is solid.
+    fn is_solid(&self, position: [i32; 3]) -> bool {
+        let [x, y, z] = position.map(|c| (c + 1) as usize);
+        self.columns[x + y * PADDED] >> z & 1 == 1
+    }
+
+    /// Whether the Cell at `(u, v)` is solid, in the layer that faces on `side` lying at `plane`
+    /// along its axis look out into.
+    fn in_front(&self, side: Side, plane: i32, u: i32, v: i32) -> bool {
+        let [u_axis, v_axis] = side.along();
+        let mut position = [if side.positive { plane } else { plane - 1 }; 3];
+        position[u_axis] = u;
+        position[v_axis] = v;
+        self.is_solid(position)
     }
 }
 
@@ -242,8 +602,8 @@ impl PaddedChunk {
             let [x, y, z] = chunk_local(index);
             padded.set([x + 1, y + 1, z + 1], voxel(cell));
         }
-        for (&offset, neighbour) in FACE_NEIGHBOURS.iter().zip(&neighbourhood.neighbours) {
-            let Some(cells) = neighbour else {
+        for offset in FACE_NEIGHBOURS {
+            let Some(cells) = neighbourhood.neighbour(offset) else {
                 // A missing neighbour's layer stays 0.
                 continue;
             };
@@ -343,7 +703,8 @@ mod tests {
 
     use super::*;
     use crate::render::test_support::{
-        World, elements, expected_quads, origin_neighbourhood, quads_of, world,
+        ShadedQuad, World, elements, expected_quads, expected_shaded_quad, origin_neighbourhood,
+        quads_of, shaded_quads, world,
     };
 
     fn padded(world: &World) -> PaddedChunk {
@@ -540,6 +901,146 @@ mod tests {
         ));
         expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(quads(&world), expected);
+    }
+
+    /// `color` darkened as a corner is at occlusion `level`: 3 for none, down to 0 for the most.
+    fn occluded(color: [f32; 4], level: usize) -> [f32; 4] {
+        let [r, g, b, a] = color;
+        let shade = OCCLUSION_SHADES[level];
+        [r * shade, g * shade, b * shade, a]
+    }
+
+    /// The quads of the origin Chunk's solid geometry with `normal`, lying in the plane where the
+    /// coordinate along that normal is `plane`.
+    fn shaded_quads_in(world: &World, normal: [f32; 3], plane: f32) -> Vec<ShadedQuad> {
+        let axis = normal.iter().position(|&n| n != 0.0).unwrap();
+        shaded_quads(&mesh_solids(
+            &origin_neighbourhood(world),
+            &SolidColors::new(&elements()),
+        ))
+        .into_iter()
+        .filter(|quad| quad.normal == normal && quad.min[axis] == plane)
+        .collect()
+    }
+
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+
+    #[test]
+    fn a_floor_along_a_wall_darkens_towards_it_in_one_strip() {
+        // A 4 × 4 Granite floor at y = 5, x and z 5 to 8, and a wall along its z = 5 edge, one
+        // Cell high, running x = 4 to 9: past both ends of the floor.
+        let mut cells: Vec<(CellPos, &str)> = Vec::new();
+        for x in 5..=8 {
+            for z in 5..=8 {
+                cells.push((CellPos::new(x, 5, z), "Granite"));
+            }
+        }
+        for x in 4..=9 {
+            cells.push((CellPos::new(x, 6, 5), "Granite"));
+        }
+        let world = world(&cells);
+
+        // The wall covers the floor's z = 5 row, so the top shows from z = 6 to 9, on y = 6.
+        // Every corner on z = 6 has two wall Cells beside it, at z = 5 and x either side of it:
+        // occlusion 1. Every other corner has none: 3. So the row along the wall is one strip,
+        // darker on its wall side, and the rest of the floor one quad.
+        let strip = expected_shaded_quad(UP, [5.0, 6.0, 6.0], [9.0, 6.0, 7.0], |[_, _, z]| {
+            occluded(GRANITE, if z == 6.0 { 1 } else { 3 })
+        });
+        let rest = expected_shaded_quad(UP, [5.0, 6.0, 7.0], [9.0, 6.0, 9.0], |_| GRANITE);
+        let mut expected = vec![strip, rest];
+        expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(shaded_quads_in(&world, UP, 6.0), expected);
+    }
+
+    #[test]
+    fn two_walls_meeting_over_a_corner_make_it_the_darkest() {
+        // A Granite floor Cell at (5, 5, 5), and Dirt walls on two sides of the Cell above it:
+        // at (4, 6, 5) on −x and (5, 6, 4) on −z. The Cell between them, (4, 6, 4), is open.
+        let world = world(&[
+            (CellPos::new(5, 5, 5), "Granite"),
+            (CellPos::new(4, 6, 5), "Dirt"),
+            (CellPos::new(5, 6, 4), "Dirt"),
+        ]);
+
+        // The floor's top spans (5, 6, 5) to (6, 6, 6). Its corner at (5, 6, 5) has a wall on
+        // either side: occlusion 0, though the Cell between the walls is open. The corners at
+        // (6, 6, 5) and (5, 6, 6) each have one wall beside them: 2. The far corner has none: 3.
+        let expected = expected_shaded_quad(UP, [5.0, 6.0, 5.0], [6.0, 6.0, 6.0], |[x, _, z]| {
+            let level = match (x == 5.0, z == 5.0) {
+                (true, true) => 0,
+                (true, false) | (false, true) => 2,
+                (false, false) => 3,
+            };
+            occluded(GRANITE, level)
+        });
+        assert_eq!(shaded_quads_in(&world, UP, 6.0), vec![expected]);
+    }
+
+    #[test]
+    fn the_darkest_corner_of_a_face_lies_in_only_one_of_its_triangles() {
+        // The floor and walls of the test above. The floor's top is one quad, whose corner at
+        // (5, 6, 5) is the darkest.
+        let world = world(&[
+            (CellPos::new(5, 5, 5), "Granite"),
+            (CellPos::new(4, 6, 5), "Dirt"),
+            (CellPos::new(5, 6, 4), "Dirt"),
+        ]);
+        let geometry = mesh_solids(
+            &origin_neighbourhood(&world),
+            &SolidColors::new(&elements()),
+        );
+        let corner = (0..geometry.positions.len())
+            .find(|&i| geometry.positions[i] == [5.0, 6.0, 5.0] && geometry.normals[i] == UP)
+            .expect("the floor's corner") as u32;
+
+        // Split along the other diagonal, the darkness stays in that corner's triangle, rather
+        // than reaching across the face to the far corner.
+        let triangles = geometry
+            .indices
+            .chunks(3)
+            .filter(|triangle| triangle.contains(&corner))
+            .count();
+        assert_eq!(triangles, 1);
+    }
+
+    #[test]
+    fn a_face_at_the_chunk_edge_is_darkened_by_a_cell_in_a_diagonal_neighbour() {
+        // A Granite Cell at (31, 31, 10), in the origin Chunk's top +x edge, and another at
+        // (32, 32, 10), which lies in the Chunk at (1, 1, 0): beside the first Cell's top face,
+        // in neither the +x nor the +y neighbour.
+        let world = world(&[
+            (CellPos::new(31, 31, 10), "Granite"),
+            (CellPos::new(32, 32, 10), "Granite"),
+        ]);
+
+        // The top spans (31, 32, 10) to (32, 32, 11). Both corners on x = 32 have the other
+        // Cell beside them: occlusion 2.
+        let expected =
+            expected_shaded_quad(UP, [31.0, 32.0, 10.0], [32.0, 32.0, 11.0], |[x, ..]| {
+                occluded(GRANITE, if x == 32.0 { 2 } else { 3 })
+            });
+        assert_eq!(shaded_quads_in(&world, UP, 32.0), vec![expected]);
+    }
+
+    #[test]
+    fn liquids_and_gases_darken_nothing() {
+        // A Granite floor Cell at (5, 5, 5), with Water and Oxygen beside the Cell above it.
+        let world = world(&[
+            (CellPos::new(5, 5, 5), "Granite"),
+            (CellPos::new(4, 6, 5), "Water"),
+            (CellPos::new(5, 6, 4), "Oxygen"),
+        ]);
+
+        let expected = expected_quads(
+            GRANITE,
+            &[([0.0, 1.0, 0.0], [5.0, 6.0, 5.0], [6.0, 6.0, 6.0])],
+        );
+        let top: Vec<_> = quads(&world)
+            .into_iter()
+            .filter(|quad| quad.normal == UP)
+            .collect();
+        assert_eq!(top, expected);
     }
 
     #[test]

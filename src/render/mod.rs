@@ -20,14 +20,16 @@ use sim::{CellPos, ChunkPos};
 use crate::sim_bridge::{Elements, SimFocus, distance_squared};
 use crate::world::WorldView;
 use fluids::{FluidLooks, mesh_fluids};
+use mesher::neighbours;
 pub(crate) use mesher::{ChunkGeometry, ChunkNeighbourhood, Faces, face_neighbours, mesh_greedy};
 use mesher::{SolidColors, mesh_solids};
 pub use scene::ScenePlugin;
 
 /// How many Chunks may start meshing each frame. Render distance fills in about 6 s, at some 200
-/// Chunks a second, and each arrival also sends up to six loaded neighbours back to be remeshed:
-/// on this laptop meshing kept up with loading at 144 frames per second. At 60 it would need
-/// about 13 a frame. Below that, meshing lags behind loading until loading ends.
+/// Chunks a second, and each arrival also sends its loaded neighbours back to be remeshed: on
+/// this laptop meshing kept up with loading at 144 frames per second, when that was up to six of
+/// them. At 60 it would need about 13 a frame. Below that, meshing lags behind loading until
+/// loading ends.
 const MESHING_STARTS_PER_FRAME: usize = 16;
 
 /// Draws the solid, liquid and tinted gas Cells of every Chunk in [`WorldView`], and keeps them up
@@ -148,8 +150,9 @@ fn use_element_colors(
 }
 
 /// Stops drawing Chunks that left the view this frame. Marks stale every Chunk in the view that
-/// changed, and every one with a face neighbour that changed or left, since the faces along its
-/// border depend on that neighbour.
+/// changed, and every one with a neighbour that changed or left, since the faces along its border
+/// depend on its face neighbours, and the shading of their corners on its edge and corner
+/// neighbours too.
 fn follow_world_view(
     mut commands: Commands,
     view: Res<WorldView>,
@@ -170,10 +173,10 @@ fn follow_world_view(
     };
     for &pos in view.changed() {
         mark_stale(pos);
-        face_neighbours(pos).into_iter().for_each(&mut mark_stale);
+        neighbours(pos).into_iter().for_each(&mut mark_stale);
     }
     for &pos in view.removed() {
-        face_neighbours(pos).into_iter().for_each(&mut mark_stale);
+        neighbours(pos).into_iter().for_each(&mut mark_stale);
     }
 }
 

@@ -60,6 +60,18 @@ Every loaded Chunk's solid Cells are drawn as flat-coloured cubes, built with `b
   - From 2 s to 6 s, the game held 141–145 frames per second on a 144 Hz display, with the worst frame at 11 ms, while meshing kept pace with loading.
   - Only the first 1.5 s had slower frames, of 20–90 ms, before most of the world is drawn.
 
+### Revised later: lighting in caves
+
+Caves were hard to read. Out of the sun, every face got the same flat ambient light, so a floor, the wall beside it and a drop beyond it all showed in one shade of their Element's colour. Three changes replaced the lighting decision and the deferred AO above:
+
+- **Ambient occlusion.** Each corner of a solid face is darkened by the solid Cells that meet there, in the layer the face looks out into: to 0.76, 0.55 or 0.35 of its colour for one, two or three of them. Two Cells across the corner from each other count as three. Liquids and gases don't darken.
+  - Every Cell in front of a greedy quad is open, so only the corners on its border can be darkened. A quad with any is split again, greedily, into runs whose corners match. Interpolating across each run then gives every Cell corner its exact shade.
+  - Each quad is split into triangles along its less occluded diagonal, so a dark corner darkens only its own triangle.
+  - The shading reads the edge and corner neighbour Chunks too. `ChunkNeighbourhood` gathers all 26 neighbours, and a Chunk goes stale when any of them changes or leaves.
+  - Cost, at the dev profile's opt-level 1, on the 75 Chunks around spawn: solid meshing went from about 0.8 to 1.5 ms a Chunk, and solid meshes have 1.9 times as many vertices.
+- **Sky light by which way a face points.** An `EnvironmentMapLight` on the camera, a 1×1 cubemap, replaces the flat ambient light (`GlobalAmbientLight::NONE`). It has intensity 550 on faces pointing up, 0.72 of that on ±x, 0.56 on ±z and 0.4 on faces pointing down. Sunlit faces look much as before. In shade, floors, the two kinds of wall and ceilings each have a shade of their own.
+- **A lamp under a roof.** A point light without shadows hangs 1 m behind and 0.4 m above the eyes. It fades in while a solid Cell lies within 24 Cells above it: 200,000 lm, range 40 m, a near-white warm. Near faces then show brighter than far ones, so depth shows, such as a drop beyond a ledge. It casts no shadows: from beside the eyes, they would hide behind what casts them.
+
 ## Seams and tests
 
 Test the pure functions inside the game crate, with `#[cfg(test)]` modules next to them:
