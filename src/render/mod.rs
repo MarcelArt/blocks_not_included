@@ -6,7 +6,7 @@ mod fluids;
 mod mesher;
 mod scene;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,12 +15,13 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use sim::ChunkPos;
+use sim::{CellPos, ChunkPos};
 
 use crate::sim_bridge::{Elements, SimFocus, distance_squared};
 use crate::world::WorldView;
 use fluids::{FluidLooks, mesh_fluids};
-use mesher::{ChunkNeighbourhood, SolidColors, face_neighbours, mesh_solids};
+pub(crate) use mesher::{ChunkGeometry, ChunkNeighbourhood, Faces, face_neighbours, mesh_greedy};
+use mesher::{SolidColors, mesh_solids};
 pub use scene::ScenePlugin;
 
 /// How many Chunks may start meshing each frame. Render distance fills in about 6 s, at some 200
@@ -179,20 +180,8 @@ fn follow_world_view(
 /// Starts meshing the stale Chunks nearest the focus on the async compute pool, up to
 /// [`MESHING_STARTS_PER_FRAME`].
 fn start_meshing(view: Res<WorldView>, focus: Res<SimFocus>, mut meshes: ResMut<ChunkMeshes>) {
-    if meshes.stale.is_empty() {
-        return;
-    }
-    let centre = ChunkPos::of(focus.0);
-    let mut nearest: Vec<ChunkPos> = meshes.stale.iter().copied().collect();
-    if nearest.len() > MESHING_STARTS_PER_FRAME {
-        nearest.select_nth_unstable_by_key(MESHING_STARTS_PER_FRAME, |&pos| {
-            distance_squared(pos, centre)
-        });
-        nearest.truncate(MESHING_STARTS_PER_FRAME);
-    }
     let pool = AsyncComputeTaskPool::get();
-    for pos in nearest {
-        meshes.stale.remove(&pos);
+    for pos in take_nearest(&mut meshes.stale, focus.0, MESHING_STARTS_PER_FRAME) {
         let Some(neighbourhood) = ChunkNeighbourhood::gather(pos, |pos| view.chunk(pos).cloned())
         else {
             continue;
@@ -208,6 +197,25 @@ fn start_meshing(view: Res<WorldView>, focus: Res<SimFocus>, mut meshes: ResMut<
         // This cancels any meshing of the Chunk already under way, which is out of date.
         meshes.tasks.insert(pos, task);
     }
+}
+
+/// Takes up to `count` Chunks out of `stale`: those nearest the Chunk of `focus`.
+pub(crate) fn take_nearest(
+    stale: &mut HashSet<ChunkPos>,
+    focus: CellPos,
+    count: usize,
+) -> Vec<ChunkPos> {
+    if stale.len() <= count {
+        return stale.drain().collect();
+    }
+    let centre = ChunkPos::of(focus);
+    let mut nearest: Vec<ChunkPos> = stale.iter().copied().collect();
+    nearest.select_nth_unstable_by_key(count, |&pos| distance_squared(pos, centre));
+    nearest.truncate(count);
+    for pos in &nearest {
+        stale.remove(pos);
+    }
+    nearest
 }
 
 /// Draws each Chunk whose meshing has finished: each layer with faces gets a new mesh, and each

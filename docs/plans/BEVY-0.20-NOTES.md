@@ -70,6 +70,22 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
   - To run a built example outside `cargo run`, set `LD_LIBRARY_PATH` to `target/debug/deps` plus the toolchain's `lib/rustlib/x86_64-unknown-linux-gnu/lib` (`dynamic_linking` needs both), and `BEVY_ASSET_ROOT` to a folder holding `assets/`.
 - **Dev profile.** The game crate is built at opt-level 1, where a call to a non-generic function from another crate isn't inlined unless that function is `#[inline]`. Mark any small `sim` function the game calls for every Cell `#[inline]`.
 
+## Found in step 14
+
+- **Run conditions.** The combinator is `or_else`, not `or`: `resource_changed::<A>.or_else(resource_changed::<B>)`. It short-circuits, so the second condition doesn't run, or update its change ticks, on frames when the first holds.
+- **Hiding meshes.**
+  - `Mesh3d` requires `Visibility` (the camera's visibility plugin registers it), so every mesh entity has one to set.
+  - To hide entities spawned during `Update` before they are drawn, set `Visibility` in `PostUpdate`, ordered `.before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate)`.
+  - A `Visibility::Hidden` mesh casts no shadow.
+- **Translucent meshes that show where a value changes.**
+  - `binary-greedy-meshing`'s `fast_mesh` with an all-zero opaque mask, and every non-zero value in the transparent mask, gives faces wherever the value changes, on both sides, merged greedily.
+  - Keep back faces culled: from any side, only the face pointing at the camera shows.
+- **egui.**
+  - `ctx.viewport_rect()` is the whole window; `content_rect()` leaves out safe-area insets.
+  - `ctx.layer_painter(egui::LayerId::new(egui::Order::Background, id))` paints over the 3D scene but under egui's windows.
+  - `egui::Rgba::from_rgb` takes linear colours, and `Color32::from(rgba)` converts them for display.
+- **Agent checks.** `Query<(), (With<Player>, Without<AwaitingSpawn>)>::single().is_ok()` tells a harness when the player has spawned. Allow about 30 s after spawn before measuring frame times: render distance is still loading and meshing before then, and frames run 20–25 ms.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

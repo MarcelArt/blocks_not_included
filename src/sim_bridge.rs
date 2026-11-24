@@ -1,8 +1,8 @@
 //! The bridge between the game and the simulation, which runs on a thread of its own (ADR 0003).
 //!
 //! The game sends the simulation thread [`SimCommand`]s. The thread sends back the Cells of every
-//! Chunk within render distance that loads or changes, which the game keeps in [`WorldView`], and
-//! a [`SimReport`] after every Tick.
+//! Chunk within render distance that loads or changes, and where the Active Region is whenever it
+//! moves, which the game keeps in [`WorldView`], and a [`SimReport`] after every Tick.
 //!
 //! # The simulation thread
 //!
@@ -28,8 +28,8 @@ use bevy::prelude::*;
 // with, is stable. Bevy depends on it already, so it costs no extra build time.
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use sim::{
-    CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, ElementTable, Phase, SimSettings,
-    SimStats, Simulation, WORLD_BOTTOM_Y, WORLD_TOP_Y,
+    ActiveRegion, CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, ElementTable, Phase,
+    SimSettings, SimStats, Simulation, WORLD_BOTTOM_Y, WORLD_TOP_Y,
 };
 use worldgen::Generator;
 
@@ -255,6 +255,7 @@ fn receive_updates(
         match received {
             Ok(SimUpdate::Chunk(ChunkUpdate { pos, cells })) => view.insert(pos, cells),
             Ok(SimUpdate::ChunkLeftView(pos)) => view.remove(pos),
+            Ok(SimUpdate::ActiveRegion(region)) => view.set_active_region(region),
             Ok(SimUpdate::Report(latest)) => *report = latest,
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
@@ -356,6 +357,8 @@ enum SimUpdate {
     Chunk(ChunkUpdate),
     /// The Chunk at this position has left render distance.
     ChunkLeftView(ChunkPos),
+    /// The Active Region has moved here.
+    ActiveRegion(ActiveRegion),
     Report(SimReport),
 }
 
@@ -381,6 +384,8 @@ struct SimThread {
     shown: HashSet<ChunkPos>,
     /// Chunks within render distance that aren't shown yet, nearest its centre first.
     to_show: VecDeque<ChunkPos>,
+    /// The Active Region as the game was last told it.
+    region_sent: Option<ActiveRegion>,
 }
 
 /// How long the simulation thread waits for a command.
@@ -401,14 +406,17 @@ impl SimThread {
             view: None,
             shown: HashSet::new(),
             to_show: VecDeque::new(),
+            region_sent: None,
         }
     }
 
     fn run(mut self) {
         // The Active Region, loaded when the simulation was made.
+        self.send_active_region();
         self.send_changed_chunks(None);
         while self.handle_commands().is_continue() {
             // Edits, and Chunks that entered the Active Region as the focus moved.
+            self.send_active_region();
             self.send_changed_chunks(None);
             if !self.paused && Instant::now() >= self.next_tick {
                 self.tick();
@@ -486,6 +494,15 @@ impl SimThread {
                  focus to ({}, {}, {})",
                 min.x, min.y, min.z, max.x, max.y, max.z, pos.x, pos.y, pos.z,
             );
+        }
+    }
+
+    /// Tells the game where the Active Region is, if it has moved since the game was last told.
+    fn send_active_region(&mut self) {
+        let region = self.sim.active_region();
+        if self.region_sent != Some(region) {
+            self.region_sent = Some(region);
+            self.send(SimUpdate::ActiveRegion(region));
         }
     }
 

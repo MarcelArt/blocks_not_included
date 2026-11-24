@@ -30,7 +30,7 @@ use crate::player::{AwaitingSpawn, Player, PlayerSystems};
 use crate::sim_bridge::{Elements, SimBridge, SimCommand, SimReport};
 use crate::world::WorldView;
 use brush::{BrushStroke, brush_cells};
-pub use palette::{Palette, Tool, cell_of};
+pub use palette::{Palette, Tool, cell_of, full_mass_grams};
 pub use target::{placement_target, stops_sight};
 
 /// How many Ticks the log follows the Cell an Edit changed: 5 s.

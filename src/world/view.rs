@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use sim::{CHUNK_SIZE, Cell, CellPos, ChunkPos};
+use sim::{ActiveRegion, CHUNK_SIZE, Cell, CellPos, ChunkPos};
 
 /// The game's copy of every Chunk within render distance of the focus, as of the latest Tick the
 /// simulation has sent (ADR 0003: up to one Tick old). The sim bridge fills it early in each
@@ -18,6 +18,7 @@ pub struct WorldView {
     chunks: HashMap<ChunkPos, Arc<[Cell]>>,
     changed: HashSet<ChunkPos>,
     removed: HashSet<ChunkPos>,
+    active_region: Option<ActiveRegion>,
 }
 
 impl WorldView {
@@ -35,6 +36,12 @@ impl WorldView {
     /// Every Chunk in the view, in no particular order.
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkPos, &Arc<[Cell]>)> {
         self.chunks.iter().map(|(&pos, cells)| (pos, cells))
+    }
+
+    /// The Active Region, as the simulation last reported it. `None` until it first does, early
+    /// in the first frames.
+    pub fn active_region(&self) -> Option<ActiveRegion> {
+        self.active_region
     }
 
     /// How many Chunks are in the view.
@@ -73,6 +80,11 @@ impl WorldView {
         self.chunks.insert(pos, cells);
         self.removed.remove(&pos);
         self.changed.insert(pos);
+    }
+
+    /// Records where the Active Region now is.
+    pub(crate) fn set_active_region(&mut self, region: ActiveRegion) {
+        self.active_region = Some(region);
     }
 
     /// Takes the Chunk at `pos` out of the view.

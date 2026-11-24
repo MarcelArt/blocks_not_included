@@ -18,7 +18,7 @@ Give these to an agent one at a time, in order, for example: "implement docs/pla
 | [11 First-person controller](11-player-controller.md) | game | done |
 | [12 God tools and palette](12-god-tools.md) | game | done |
 | [13 Liquids and gases on screen](13-fluid-rendering.md) | game, sim | done |
-| [14 Overlays and crosshair readout](14-overlays-readout.md) | game | todo |
+| [14 Overlays and crosshair readout](14-overlays-readout.md) | game | done |
 | [15 Debug panel and hot reload](15-debug-hot-reload.md) | game, sim | todo |
 
 Steps 01–08 can be tested without opening a window. From step 10 on, each step ends with a list of things for you to check in the running game.

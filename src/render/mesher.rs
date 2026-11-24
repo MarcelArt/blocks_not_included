@@ -2,8 +2,8 @@
 //!
 //! The mesher reads a padded cube of `(CHUNK_SIZE + 2)³` values: the Chunk's own Cells, plus the
 //! layer of Cells that touches it from each face neighbour, so that a face against a solid
-//! neighbour is left out. A value of 0 means "not solid"; any other value is the Cell's
-//! [`ElementId::index`] + 1.
+//! neighbour is left out. For solids, a value of 0 means "not solid"; any other value is the
+//! Cell's [`ElementId::index`] + 1. [`mesh_greedy`] lets the Overlays choose values of their own.
 
 use std::sync::Arc;
 
@@ -58,10 +58,11 @@ impl SolidColors {
     }
 
     /// The colour of the solid Element whose mesher value is `voxel`.
-    fn of_voxel(&self, voxel: u64) -> [f32; 4] {
-        usize::try_from(voxel - 1)
-            .ok()
-            .and_then(|index| self.0.get(index).copied().flatten())
+    fn of_voxel(&self, voxel: u16) -> [f32; 4] {
+        self.0
+            .get(usize::from(voxel) - 1)
+            .copied()
+            .flatten()
             .expect("the mesher emits quads only for the values of solid Elements")
     }
 }
@@ -135,17 +136,46 @@ pub struct ChunkGeometry {
 /// Meshes the solid Cells of a Chunk. Faces between two solid Cells are left out, and so are
 /// faces against a solid Cell of a neighbour Chunk; a missing neighbour counts as not solid.
 pub fn mesh_solids(neighbourhood: &ChunkNeighbourhood, colors: &SolidColors) -> ChunkGeometry {
-    let solid = |cell: &Cell| colors.voxel(cell.element) != 0;
-    if !neighbourhood.cells.iter().any(solid) {
-        // Such as a Chunk high in the Atmosphere: about half of render distance.
+    mesh_greedy(
+        neighbourhood,
+        |cell| colors.voxel(cell.element),
+        Faces::Opaque,
+        |voxel| colors.of_voxel(voxel),
+    )
+}
+
+/// Which faces between two drawn Cells [`mesh_greedy`] leaves out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Faces {
+    /// Every one: neither Cell can be seen through.
+    Opaque,
+    /// Only those between two Cells of the same value. Where the value changes, both Cells show a
+    /// face, each facing the other.
+    Translucent,
+}
+
+/// Meshes the Cells of a Chunk that `voxel` gives a value other than 0, merging neighbouring
+/// faces of the same value, and colouring each face by its Cell's value with `color`. A face
+/// shows against a Cell of value 0, and against a missing neighbour Chunk.
+pub fn mesh_greedy(
+    neighbourhood: &ChunkNeighbourhood,
+    voxel: impl Fn(Cell) -> u16,
+    faces: Faces,
+    color: impl Fn(u16) -> [f32; 4],
+) -> ChunkGeometry {
+    if neighbourhood.cells.iter().all(|&cell| voxel(cell) == 0) {
+        // Such as a Chunk of solids high in the Atmosphere: about half of render distance.
         return ChunkGeometry::default();
     }
-    let padded = PaddedChunk::new(neighbourhood, colors);
+    let padded = PaddedChunk::new(neighbourhood, voxel);
     let mut mesher = Mesher::<CHUNK_SIZE>::new();
-    // Every solid is opaque, so no value is transparent.
-    let transparent_columns = vec![0; PADDED.pow(2)];
-    mesher.fast_mesh(&padded.voxels, &padded.solid_columns, &transparent_columns);
-    ChunkGeometry::from_quads(&mesher.quads, colors)
+    let none = vec![0; PADDED.pow(2)];
+    let (opaque, translucent): (&[u64], &[u64]) = match faces {
+        Faces::Opaque => (&padded.columns, &none),
+        Faces::Translucent => (&none, &padded.columns),
+    };
+    mesher.fast_mesh(&padded.voxels, opaque, translucent);
+    ChunkGeometry::from_quads(&mesher.quads, color)
 }
 
 impl ChunkGeometry {
@@ -166,8 +196,9 @@ impl ChunkGeometry {
         .with_inserted_indices(Indices::U32(self.indices))
     }
 
-    /// `quads` lists the mesher's quads for each face direction, in [`Face`] order.
-    fn from_quads(quads: &[Vec<Quad>; 6], colors: &SolidColors) -> Self {
+    /// `quads` lists the mesher's quads for each face direction, in [`Face`] order. `color` gives
+    /// the colour of a quad's value.
+    fn from_quads(quads: &[Vec<Quad>; 6], color: impl Fn(u16) -> [f32; 4]) -> Self {
         let count = quads.iter().map(Vec::len).sum();
         let mut geometry = Self {
             positions: Vec::with_capacity(count * 4),
@@ -178,7 +209,8 @@ impl ChunkGeometry {
         for (face, quads) in (0..6).map(Face::from).zip(quads) {
             let normal = face.n().map(|n| n as f32);
             for &quad in quads {
-                let color = colors.of_voxel(quad.voxel_id());
+                let voxel = u16::try_from(quad.voxel_id()).expect("values are u16");
+                let color = color(voxel);
                 for vertex in face.vertices_packed(quad) {
                     geometry.positions.push(vertex.xyz().map(|c| c as f32));
                     geometry.normals.push(normal);
@@ -196,30 +228,30 @@ struct PaddedChunk {
     /// (`binary_greedy_meshing::pad_linearize`). That is not the order `sim` lists Cells in.
     voxels: Box<[u16]>,
     /// One `u64` per (x, y) column of `voxels`, with bit z set where that value isn't 0.
-    solid_columns: Box<[u64]>,
+    columns: Box<[u64]>,
 }
 
 impl PaddedChunk {
-    fn new(neighbourhood: &ChunkNeighbourhood, colors: &SolidColors) -> Self {
+    /// The values `voxel` gives the Chunk's Cells and the layer around it.
+    fn new(neighbourhood: &ChunkNeighbourhood, voxel: impl Fn(Cell) -> u16) -> Self {
         let mut padded = Self {
             voxels: vec![0; PADDED.pow(3)].into(),
-            solid_columns: vec![0; PADDED.pow(2)].into(),
+            columns: vec![0; PADDED.pow(2)].into(),
         };
-        for (index, cell) in neighbourhood.cells.iter().enumerate() {
+        for (index, &cell) in neighbourhood.cells.iter().enumerate() {
             let [x, y, z] = chunk_local(index);
-            padded.set([x + 1, y + 1, z + 1], colors.voxel(cell.element));
+            padded.set([x + 1, y + 1, z + 1], voxel(cell));
         }
         for (&offset, neighbour) in FACE_NEIGHBOURS.iter().zip(&neighbourhood.neighbours) {
             let Some(cells) = neighbour else {
-                // A missing neighbour counts as not solid: its layer stays 0.
+                // A missing neighbour's layer stays 0.
                 continue;
             };
             let face = BorderLayer::facing(offset);
             for a in 0..CHUNK_SIZE {
                 for b in 0..CHUNK_SIZE {
                     let (local, padded_pos) = face.cell(a, b);
-                    let cell = cells[chunk_index(local)];
-                    padded.set(padded_pos, colors.voxel(cell.element));
+                    padded.set(padded_pos, voxel(cells[chunk_index(local)]));
                 }
             }
         }
@@ -231,7 +263,7 @@ impl PaddedChunk {
         if voxel != 0 {
             let column = x + y * PADDED;
             self.voxels[z + column * PADDED] = voxel;
-            self.solid_columns[column] |= 1 << z;
+            self.columns[column] |= 1 << z;
         }
     }
 }
@@ -315,7 +347,10 @@ mod tests {
     };
 
     fn padded(world: &World) -> PaddedChunk {
-        PaddedChunk::new(&origin_neighbourhood(world), &SolidColors::new(&elements()))
+        let colors = SolidColors::new(&elements());
+        PaddedChunk::new(&origin_neighbourhood(world), |cell| {
+            colors.voxel(cell.element)
+        })
     }
 
     #[test]
@@ -390,7 +425,7 @@ mod tests {
         let padded = padded(&world);
 
         assert!(padded.voxels.iter().all(|&voxel| voxel == 0));
-        assert!(padded.solid_columns.iter().all(|&column| column == 0));
+        assert!(padded.columns.iter().all(|&column| column == 0));
     }
 
     /// The quads of the origin Chunk's solid geometry, checked and sorted by [`quads_of`].

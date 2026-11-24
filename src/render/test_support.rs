@@ -57,9 +57,29 @@ pub fn world(cells: &[(CellPos, &str)]) -> World {
 /// A world holding nothing but the Cells listed, each of the named Element and Mass in grams.
 /// Every Chunk with a listed Cell is loaded; all others are missing.
 pub fn world_with_mass(cells: &[(CellPos, &str, u32)]) -> World {
+    let cells: Vec<_> = cells
+        .iter()
+        .map(|&(pos, name, mass_grams)| (pos, name, mass_grams, 293.15))
+        .collect();
+    world_of(&cells)
+}
+
+/// A world holding nothing but the Cells listed, each of the named Element, 1 kg and the
+/// temperature in kelvin. Every Chunk with a listed Cell is loaded; all others are missing.
+pub fn world_with_temperature(cells: &[(CellPos, &str, f32)]) -> World {
+    let cells: Vec<_> = cells
+        .iter()
+        .map(|&(pos, name, temperature_k)| (pos, name, 1_000, temperature_k))
+        .collect();
+    world_of(&cells)
+}
+
+/// A world holding nothing but the Cells listed, as `(position, Element, Mass in grams,
+/// temperature in kelvin)`. Every Chunk with a listed Cell is loaded; all others are missing.
+fn world_of(cells: &[(CellPos, &str, u32, f32)]) -> World {
     let elements = elements();
     let mut chunks: HashMap<ChunkPos, Vec<Cell>> = HashMap::new();
-    for &(pos, name, mass_grams) in cells {
+    for &(pos, name, mass_grams, temperature_k) in cells {
         let (chunk, index) = locate(pos);
         let element = elements.id_of(name).expect("a test Element");
         chunks
@@ -67,7 +87,7 @@ pub fn world_with_mass(cells: &[(CellPos, &str, u32)]) -> World {
             .or_insert_with(|| vec![Cell::VACUUM; CHUNK_SIZE.pow(3)])[index] = Cell {
             element,
             mass_grams,
-            temperature_k: 293.15,
+            temperature_k,
         };
     }
     chunks

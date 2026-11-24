@@ -23,7 +23,8 @@
         (
             name: "Carbon Dioxide",
             phase: Gas,
-            color: (0.45, 0.45, 0.45),
+            // Dark, so it stands apart from Oxygen and Granite in the Element Overlay.
+            color: (0.1, 0.1, 0.1),
             density: 1.98,
             specific_heat: 0.846,
             conductivity: 0.0146,

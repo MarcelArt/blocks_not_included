@@ -286,3 +286,31 @@ fn exiting_the_app_shuts_the_simulation_thread_down() {
         "the simulation thread was still running after the app exited"
     );
 }
+
+/// The Active Region as the world view last heard it from the simulation, as its first and last
+/// Chunks.
+fn active_region(app: &App) -> Option<(ChunkPos, ChunkPos)> {
+    app.world()
+        .resource::<WorldView>()
+        .active_region()
+        .map(|region| (region.min(), region.max()))
+}
+
+#[test]
+fn the_world_view_holds_the_active_region_and_follows_it_as_the_focus_moves() {
+    let mut app = app_with(Box::new(VacuumSource));
+
+    // The default Active Region is 4 × 2 × 4 Chunks, best centred on the focus at the origin.
+    // Along x and z, Chunks −2 to 1 span Cells −64 to 63, centred on 0; along y, Chunks −1 to 0
+    // span Cells −32 to 31.
+    update_until(&mut app, "the Active Region arrives", |app| {
+        active_region(app) == Some((ChunkPos::new(-2, -1, -2), ChunkPos::new(1, 0, 1)))
+    });
+
+    // Along x, Chunks 29 to 32 span Cells 928 to 1055, centred on 991.5: nearer 1000 than the
+    // 1023.5 of Chunks 30 to 33.
+    app.world_mut().resource_mut::<SimFocus>().0 = CellPos::new(1_000, 0, 0);
+    update_until(&mut app, "the Active Region follows the focus", |app| {
+        active_region(app) == Some((ChunkPos::new(29, -1, -2), ChunkPos::new(32, 0, 1)))
+    });
+}
