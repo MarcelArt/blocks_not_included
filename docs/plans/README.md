@@ -17,7 +17,7 @@ Give these to an agent one at a time, in order, for example: "implement docs/pla
 | [10 Rendering solid Cells](10-solid-rendering.md) | game | done |
 | [11 First-person controller](11-player-controller.md) | game | done |
 | [12 God tools and palette](12-god-tools.md) | game | done |
-| [13 Liquids and gases on screen](13-fluid-rendering.md) | game | todo |
+| [13 Liquids and gases on screen](13-fluid-rendering.md) | game, sim | done |
 | [14 Overlays and crosshair readout](14-overlays-readout.md) | game | todo |
 | [15 Debug panel and hot reload](15-debug-hot-reload.md) | game, sim | todo |
 

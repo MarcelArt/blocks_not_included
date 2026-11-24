@@ -19,6 +19,8 @@ impl ElementId {
     ///
     /// Vacuum is 0. In a table loaded with [`ElementTable::from_ron`], every other index is the
     /// Element's 1-based position in the file.
+    // Renderers call this for every Cell they mesh, from another crate.
+    #[inline]
     pub fn index(self) -> u16 {
         self.0
     }
@@ -125,6 +127,10 @@ pub struct Element {
     pub specific_heat: f32,
     /// How readily heat passes through, W/(m·K).
     pub conductivity: f32,
+    /// How strongly a gas of this Element tints the view, from 0 (invisible) to 1. Renderers draw
+    /// a gas with a tint above 0 at this opacity; other Phases ignore it.
+    #[serde(default)]
+    pub tint: f32,
     /// Below `low.temperature_k` this Element becomes `low.into`.
     #[serde(default)]
     pub low: Option<Transition>,
@@ -134,8 +140,8 @@ pub struct Element {
 }
 
 impl Element {
-    /// A new grey solid with no Density, heat capacity, conductivity or Phase Transitions; set
-    /// those with the builder methods.
+    /// A new grey, untinted solid with no Density, heat capacity, conductivity or Phase
+    /// Transitions; set those with the builder methods.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -144,6 +150,7 @@ impl Element {
             density: 0.0,
             specific_heat: 0.0,
             conductivity: 0.0,
+            tint: 0.0,
             low: None,
             high: None,
         }
@@ -171,6 +178,12 @@ impl Element {
 
     pub fn conductivity(mut self, watts_per_metre_kelvin: f32) -> Self {
         self.conductivity = watts_per_metre_kelvin;
+        self
+    }
+
+    /// How strongly a gas of this Element tints the view, from 0 to 1.
+    pub fn tint(mut self, tint: f32) -> Self {
+        self.tint = tint;
         self
     }
 
@@ -235,11 +248,11 @@ pub enum ElementError {
         low_k: f32,
         high_k: f32,
     },
-    /// Rule 5: a physical property is out of range. Density and specific heat must be above
-    /// zero, and conductivity must not be negative.
+    /// Rule 5: a property is out of range. Density and specific heat must be above zero,
+    /// conductivity must not be negative, and tint must be from 0 to 1 (step 13).
     InvalidProperty {
         element: String,
-        /// `"density"`, `"specific_heat"` or `"conductivity"`.
+        /// `"density"`, `"specific_heat"`, `"conductivity"` or `"tint"`.
         property: &'static str,
         value: f32,
     },
@@ -311,10 +324,10 @@ impl fmt::Display for ElementError {
                 property,
                 value,
             } => {
-                let needed = if *property == "conductivity" {
-                    "at least 0"
-                } else {
-                    "above 0"
+                let needed = match *property {
+                    "conductivity" => "at least 0",
+                    "tint" => "from 0 to 1",
+                    _ => "above 0",
                 };
                 write!(
                     f,
@@ -339,6 +352,7 @@ static SEALED_EDGE: Element = Element {
     density: 0.0,
     specific_heat: 0.0,
     conductivity: 0.0,
+    tint: 0.0,
     low: None,
     high: None,
 };
@@ -419,7 +433,7 @@ impl ElementTable {
         Ok(())
     }
 
-    /// Rules 1 and 5, and the vacuum Phase rule, for one listed Element.
+    /// Rules 1 and 5, the tint's range, and the vacuum Phase rule, for one listed Element.
     fn validate_properties<'a>(
         &self,
         id: ElementId,
@@ -452,6 +466,7 @@ impl ElementTable {
                 element.conductivity,
                 element.conductivity >= 0.0,
             ),
+            ("tint", element.tint, (0.0..=1.0).contains(&element.tint)),
         ] {
             if !in_range {
                 return Err(ElementError::InvalidProperty {

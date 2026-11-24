@@ -1,4 +1,4 @@
-use sim::{ElementError, ElementTable, Phase};
+use sim::{Element, ElementError, ElementTable, Phase};
 
 const SHIPPED_ELEMENTS: &str = include_str!("../../../assets/elements.ron");
 
@@ -181,4 +181,56 @@ fn a_transition_into_vacuum_is_rejected() {
     let error = rejection_naming("Hydrogen", &text);
 
     assert!(matches!(error, ElementError::WrongDirection { .. }), "{error:?}");
+}
+
+#[test]
+fn a_tint_outside_0_to_1_is_rejected() {
+    for tint in ["-0.1", "1.5", "NaN"] {
+        let text = file(&[element("Fog", "Gas", &format!("tint: {tint}"))]);
+
+        let error = rejection_naming("Fog", &text);
+
+        assert!(
+            matches!(
+                error,
+                ElementError::InvalidProperty {
+                    property: "tint",
+                    ..
+                }
+            ),
+            "tint {tint}: {error:?}"
+        );
+    }
+
+    // The builder sets the same field, and both ends of the range are allowed.
+    let fog = |tint| {
+        let mut elements = ElementTable::new();
+        elements.add(
+            Element::new("Fog")
+                .phase(Phase::Gas)
+                .density(1.0)
+                .specific_heat(1.0)
+                .tint(tint),
+        );
+        elements.validate()
+    };
+    assert_eq!(fog(0.0), Ok(()));
+    assert_eq!(fog(1.0), Ok(()));
+    assert!(matches!(
+        fog(1.01),
+        Err(ElementError::InvalidProperty {
+            property: "tint",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn steam_is_the_only_tinted_element_in_the_shipped_file() {
+    let elements = ElementTable::from_ron(SHIPPED_ELEMENTS).expect("the shipped file is valid");
+
+    for (_, element) in elements.iter() {
+        let expected = if element.name == "Steam" { 0.15 } else { 0.0 };
+        assert_eq!(element.tint, expected, "{}", element.name);
+    }
 }

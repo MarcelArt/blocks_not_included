@@ -57,6 +57,19 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **Gizmos.** `gizmos.cube(transform, color)` and `gizmos.sphere(Isometry3d::from_translation(centre), radius, color)`, drawn from `Update`.
 - **Agent checks.** Presses made on `ButtonInput` don't reach egui, which reads input messages. In a window without focus, `Window::cursor_position()` is `None`.
 
+## Found in step 13
+
+- **Translucent `StandardMaterial`.**
+  - With `AlphaMode::Blend`, vertex colours multiply the base colour, alpha included. A white base therefore lets each vertex's alpha set its opacity.
+  - Blend pipelines don't write depth, so every overlapping face in a mesh shows, blended in index order.
+  - Blend meshes still cast shadows: the shadow pass treats them as `MAY_DISCARD`. Add `bevy::light::NotShadowCaster` to stop that.
+  - `cull_mode: None` with `double_sided: true` shows a face from both sides, lit correctly from each.
+- **OIT** needs `OrderIndependentTransparencySettings` on the camera. `Material::enable_oit` already defaults to `true`, so `StandardMaterial` takes part once the camera has the setting.
+- **Measuring frame time on this laptop.**
+  - The Steam client can take a whole core in the background, and the laptop slows as it warms up, so runs drift over time. Build the A and B versions as separate binaries, and alternate their runs.
+  - To run a built example outside `cargo run`, set `LD_LIBRARY_PATH` to `target/debug/deps` plus the toolchain's `lib/rustlib/x86_64-unknown-linux-gnu/lib` (`dynamic_linking` needs both), and `BEVY_ASSET_ROOT` to a folder holding `assets/`.
+- **Dev profile.** The game crate is built at opt-level 1, where a call to a non-generic function from another crate isn't inlined unless that function is `#[inline]`. Mark any small `sim` function the game calls for every Cell `#[inline]`.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

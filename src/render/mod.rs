@@ -1,13 +1,17 @@
 //! Drawing the world: every Chunk in [`WorldView`] has its solid Cells drawn as flat-coloured
-//! cubes, remeshed off the main thread whenever they change. [`ScenePlugin`] adds the sky, the
-//! sun and a camera.
+//! cubes, its liquids as translucent volumes, and its tinted gases as a faint haze, remeshed off
+//! the main thread whenever they change. [`ScenePlugin`] adds the sky and the sun.
 
+mod fluids;
 mod mesher;
 mod scene;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
@@ -15,6 +19,7 @@ use sim::ChunkPos;
 
 use crate::sim_bridge::{Elements, SimFocus, distance_squared};
 use crate::world::WorldView;
+use fluids::{FluidLooks, mesh_fluids};
 use mesher::{ChunkNeighbourhood, SolidColors, face_neighbours, mesh_solids};
 pub use scene::ScenePlugin;
 
@@ -24,8 +29,8 @@ pub use scene::ScenePlugin;
 /// about 13 a frame. Below that, meshing lags behind loading until loading ends.
 const MESHING_STARTS_PER_FRAME: usize = 16;
 
-/// Draws the solid Cells of every Chunk in [`WorldView`], and keeps them up to date. Needs the
-/// sim bridge.
+/// Draws the solid, liquid and tinted gas Cells of every Chunk in [`WorldView`], and keeps them up
+/// to date. Needs the sim bridge.
 pub struct ChunkMeshPlugin;
 
 impl Plugin for ChunkMeshPlugin {
@@ -43,22 +48,48 @@ impl Plugin for ChunkMeshPlugin {
     }
 }
 
-/// The entity drawing the solid Cells of the Chunk at this position.
+/// Which of a Chunk's meshes an entity draws. Each has a material of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChunkLayer {
+    /// Opaque, flat-coloured cubes.
+    Solid,
+    /// Translucent volumes, whose tops show how full each Cell is.
+    Liquid,
+    /// A faint, unlit haze around each gas whose Element has a tint.
+    Gas,
+}
+
+impl ChunkLayer {
+    const ALL: [ChunkLayer; 3] = [ChunkLayer::Solid, ChunkLayer::Liquid, ChunkLayer::Gas];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The entity drawing one layer of the Chunk at `pos`.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SolidMesh(pub ChunkPos);
+pub struct ChunkMesh {
+    pub pos: ChunkPos,
+    pub layer: ChunkLayer,
+}
+
+/// A Chunk's new meshes, by [`ChunkLayer`]: `None` for a layer with nothing to draw.
+type LayerMeshes = [Option<Mesh>; 3];
 
 /// What is drawn of each Chunk, and what is being meshed.
 #[derive(Resource)]
 struct ChunkMeshes {
-    /// The one material every Chunk shares: white, so the vertex colours show.
-    material: Handle<StandardMaterial>,
+    /// One material per [`ChunkLayer`], shared by every Chunk: white, so the vertex colours show.
+    materials: [Handle<StandardMaterial>; 3],
     colors: Arc<SolidColors>,
-    /// Chunks in the view whose mesh is out of date and not yet being remade.
+    looks: Arc<FluidLooks>,
+    /// Chunks in the view whose meshes are out of date and not yet being remade.
     stale: HashSet<ChunkPos>,
     /// Meshing under way. Dropping a task cancels it.
-    tasks: HashMap<ChunkPos, Task<Option<Mesh>>>,
-    /// The entity drawing each Chunk that has any solid faces.
-    entities: HashMap<ChunkPos, Entity>,
+    tasks: HashMap<ChunkPos, Task<LayerMeshes>>,
+    /// The entities drawing each Chunk, by [`ChunkLayer`]. A layer with nothing to draw has none.
+    entities: HashMap<ChunkPos, [Option<Entity>; 3]>,
 }
 
 fn set_up_chunk_meshes(
@@ -66,16 +97,38 @@ fn set_up_chunk_meshes(
     mut materials: ResMut<Assets<StandardMaterial>>,
     elements: Res<Elements>,
 ) {
-    let material = materials.add(StandardMaterial {
+    let solid = StandardMaterial {
         base_color: Color::WHITE,
         // Rock and soil: matte, with no highlights.
         perceptual_roughness: 1.0,
         reflectance: 0.1,
         ..default()
-    });
+    };
+    // Fluid faces show from both sides, so a surface stays visible from beneath it, and from
+    // inside a cloud of gas. Translucent faces don't write depth, so overlapping ones all show.
+    let liquid = StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Blend,
+        // A smooth surface that catches the sun.
+        perceptual_roughness: 0.2,
+        reflectance: 0.3,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    };
+    let gas = StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Blend,
+        // A haze rather than a surface: the same colour from every side.
+        unlit: true,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    };
     commands.insert_resource(ChunkMeshes {
-        material,
+        materials: [solid, liquid, gas].map(|material| materials.add(material)),
         colors: Arc::new(SolidColors::new(&elements)),
+        looks: Arc::new(FluidLooks::new(&elements)),
         stale: HashSet::new(),
         tasks: HashMap::new(),
         entities: HashMap::new(),
@@ -89,6 +142,7 @@ fn use_element_colors(
     mut meshes: ResMut<ChunkMeshes>,
 ) {
     meshes.colors = Arc::new(SolidColors::new(&elements));
+    meshes.looks = Arc::new(FluidLooks::new(&elements));
     meshes.stale.extend(view.chunks().map(|(pos, _)| pos));
 }
 
@@ -104,7 +158,7 @@ fn follow_world_view(
     for pos in view.removed() {
         meshes.stale.remove(pos);
         meshes.tasks.remove(pos);
-        if let Some(entity) = meshes.entities.remove(pos) {
+        for entity in meshes.entities.remove(pos).into_iter().flatten().flatten() {
             commands.entity(entity).despawn();
         }
     }
@@ -144,56 +198,69 @@ fn start_meshing(view: Res<WorldView>, focus: Res<SimFocus>, mut meshes: ResMut<
             continue;
         };
         let colors = Arc::clone(&meshes.colors);
+        let looks = Arc::clone(&meshes.looks);
         let task = pool.spawn(async move {
-            let geometry = mesh_solids(&neighbourhood, &colors);
-            (!geometry.is_empty()).then(|| geometry.into_mesh())
+            let solid = mesh_solids(&neighbourhood, &colors);
+            let fluids = mesh_fluids(&neighbourhood, &looks);
+            [solid, fluids.liquid, fluids.gas]
+                .map(|geometry| (!geometry.is_empty()).then(|| geometry.into_mesh()))
         });
         // This cancels any meshing of the Chunk already under way, which is out of date.
         meshes.tasks.insert(pos, task);
     }
 }
 
-/// Draws each Chunk whose meshing has finished, or stops drawing it if it has no solid faces.
+/// Draws each Chunk whose meshing has finished: each layer with faces gets a new mesh, and each
+/// without stops being drawn.
 fn finish_meshing(
     mut commands: Commands,
     mut meshes: ResMut<ChunkMeshes>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
 ) {
     let ChunkMeshes {
-        material,
+        materials,
         tasks,
         entities,
         ..
     } = &mut *meshes;
     tasks.retain(|&pos, task| {
-        let Some(mesh) = check_ready(task) else {
+        let Some(layer_meshes) = check_ready(task) else {
             return true;
         };
-        match (mesh, entities.get(&pos).copied()) {
-            (Some(mesh), Some(entity)) => {
-                commands
-                    .entity(entity)
-                    .insert(Mesh3d(mesh_assets.add(mesh)));
-            }
-            (Some(mesh), None) => {
-                let origin = pos.origin();
-                let entity = commands
-                    .spawn((
-                        SolidMesh(pos),
+        let drawn = entities.entry(pos).or_default();
+        for (layer, mesh) in ChunkLayer::ALL.into_iter().zip(layer_meshes) {
+            let entity = &mut drawn[layer.index()];
+            match (mesh, *entity) {
+                (Some(mesh), Some(entity)) => {
+                    commands
+                        .entity(entity)
+                        .insert(Mesh3d(mesh_assets.add(mesh)));
+                }
+                (Some(mesh), None) => {
+                    let origin = pos.origin();
+                    let mut spawned = commands.spawn((
+                        ChunkMesh { pos, layer },
                         Mesh3d(mesh_assets.add(mesh)),
-                        MeshMaterial3d(material.clone()),
+                        MeshMaterial3d(materials[layer.index()].clone()),
                         Transform::from_translation(
                             IVec3::new(origin.x, origin.y, origin.z).as_vec3(),
                         ),
-                    ))
-                    .id();
-                entities.insert(pos, entity);
+                    ));
+                    if layer != ChunkLayer::Solid {
+                        // Light passes through fluids.
+                        spawned.insert(NotShadowCaster);
+                    }
+                    *entity = Some(spawned.id());
+                }
+                (None, Some(old)) => {
+                    commands.entity(old).despawn();
+                    *entity = None;
+                }
+                (None, None) => {}
             }
-            (None, Some(entity)) => {
-                commands.entity(entity).despawn();
-                entities.remove(&pos);
-            }
-            (None, None) => {}
+        }
+        if drawn.iter().all(Option::is_none) {
+            entities.remove(&pos);
         }
         false
     });

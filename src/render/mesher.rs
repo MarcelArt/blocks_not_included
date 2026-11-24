@@ -84,6 +84,41 @@ impl ChunkNeighbourhood {
         let neighbours = face_neighbours(pos).map(chunk);
         Some(Self { cells, neighbours })
     }
+
+    /// The Chunk's own Cells, in the order `sim` lists them.
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    /// The Cell at `[x, y, z]` relative to the Chunk's origin, which may lie one Cell outside the
+    /// Chunk along one axis, in a face neighbour. `None` if that neighbour isn't loaded, and for a
+    /// position in an edge or corner neighbour, which isn't gathered.
+    pub fn cell(&self, [x, y, z]: [i32; 3]) -> Option<Cell> {
+        let size = CHUNK_SIZE as i32;
+        let inside = |c: i32| (0..size).contains(&c);
+        if inside(x) && inside(y) && inside(z) {
+            // In the Chunk itself, as nearly every lookup is.
+            return Some(self.cells[chunk_index([x, y, z].map(|c| c as usize))]);
+        }
+        let step = |c: i32| {
+            debug_assert!(
+                (-1..=size).contains(&c),
+                "{c} is more than one Cell outside"
+            );
+            if c < 0 {
+                -1
+            } else if c >= size {
+                1
+            } else {
+                0
+            }
+        };
+        let offset = (step(x), step(y), step(z));
+        let neighbour = FACE_NEIGHBOURS.iter().position(|&o| o == offset)?;
+        let cells = self.neighbours[neighbour].as_ref()?;
+        let local = [x, y, z].map(|c| c.rem_euclid(size) as usize);
+        Some(cells[chunk_index(local)])
+    }
 }
 
 /// A Chunk's solid Cells as triangles, with positions relative to the Chunk's origin. Every four
@@ -255,7 +290,7 @@ impl BorderLayer {
 
 /// The position `[x, y, z]` within its Chunk of the Cell at `index`, in the order `sim` lists a
 /// Chunk's Cells: x fastest, then z, then y.
-fn chunk_local(index: usize) -> [usize; 3] {
+pub(super) fn chunk_local(index: usize) -> [usize; 3] {
     [
         index % CHUNK_SIZE,
         index / CHUNK_SIZE.pow(2),
@@ -264,7 +299,7 @@ fn chunk_local(index: usize) -> [usize; 3] {
 }
 
 /// The index of the Cell at `[x, y, z]` within its Chunk, in the order `sim` lists them.
-fn chunk_index([x, y, z]: [usize; 3]) -> usize {
+pub(super) fn chunk_index([x, y, z]: [usize; 3]) -> usize {
     (y * CHUNK_SIZE + z) * CHUNK_SIZE + x
 }
 
@@ -272,56 +307,14 @@ fn chunk_index([x, y, z]: [usize; 3]) -> usize {
 mod tests {
     use std::collections::HashMap;
 
-    use sim::{CellPos, Element};
+    use sim::CellPos;
 
     use super::*;
-    use crate::world::locate;
+    use crate::render::test_support::{
+        World, elements, expected_quads, origin_neighbourhood, quads_of, world,
+    };
 
-    /// Vacuum 0, Granite 1, Dirt 2, Water 3, Oxygen 4.
-    fn elements() -> ElementTable {
-        let mut elements = ElementTable::new();
-        elements.add(Element::new("Granite").color([0.55, 0.5, 0.5]));
-        elements.add(Element::new("Dirt").color([0.45, 0.3, 0.18]));
-        elements.add(Element::new("Water").phase(Phase::Liquid));
-        elements.add(Element::new("Oxygen").phase(Phase::Gas));
-        elements
-    }
-
-    /// A world holding nothing but the Cells listed, each of the named Element. Every Chunk
-    /// with a listed Cell is loaded; all others are missing.
-    fn world(cells: &[(CellPos, &str)]) -> HashMap<ChunkPos, Arc<[Cell]>> {
-        let elements = elements();
-        let mut chunks: HashMap<ChunkPos, Vec<Cell>> = HashMap::new();
-        for &(pos, name) in cells {
-            let (chunk, index) = locate(pos);
-            let element = elements.id_of(name).expect("a test Element");
-            chunks
-                .entry(chunk)
-                .or_insert_with(|| vec![Cell::VACUUM; CHUNK_SIZE.pow(3)])[index] = Cell {
-                element,
-                mass_grams: 1_000,
-                temperature_k: 293.15,
-            };
-        }
-        chunks
-            .into_iter()
-            .map(|(pos, cells)| (pos, Arc::from(cells)))
-            .collect()
-    }
-
-    /// The Chunk at the origin, with its neighbours as they are in `world`. The origin Chunk is
-    /// all Vacuum if `world` lacks it.
-    fn origin_neighbourhood(world: &HashMap<ChunkPos, Arc<[Cell]>>) -> ChunkNeighbourhood {
-        let origin = ChunkPos::new(0, 0, 0);
-        ChunkNeighbourhood::gather(origin, |pos| {
-            world.get(&pos).cloned().or_else(|| {
-                (pos == origin).then(|| Arc::from(vec![Cell::VACUUM; CHUNK_SIZE.pow(3)]))
-            })
-        })
-        .expect("the origin Chunk")
-    }
-
-    fn padded(world: &HashMap<ChunkPos, Arc<[Cell]>>) -> PaddedChunk {
+    fn padded(world: &World) -> PaddedChunk {
         PaddedChunk::new(&origin_neighbourhood(world), &SolidColors::new(&elements()))
     }
 
@@ -400,102 +393,16 @@ mod tests {
         assert!(padded.solid_columns.iter().all(|&column| column == 0));
     }
 
-    /// One quad of a [`ChunkGeometry`]: the box its corners span, which is flat along its normal.
-    #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-    struct Quad {
-        normal: [f32; 3],
-        min: [f32; 3],
-        max: [f32; 3],
-        color: [f32; 4],
-    }
-
-    /// The quads of the origin Chunk's geometry, sorted. Checks, for every quad, that its four
-    /// corners share one normal and colour, that it is flat along that normal, and that both its
-    /// triangles wind counter-clockwise seen from where the normal points, as Bevy needs to show
-    /// them.
-    fn quads(world: &HashMap<ChunkPos, Arc<[Cell]>>) -> Vec<Quad> {
-        let geometry = mesh_solids(&origin_neighbourhood(world), &SolidColors::new(&elements()));
-        let vertices = geometry.positions.len();
-        assert_eq!(vertices % 4, 0);
-        assert_eq!(geometry.normals.len(), vertices);
-        assert_eq!(geometry.colors.len(), vertices);
-        assert_eq!(geometry.indices.len(), vertices / 4 * 6);
-
-        let vec = |p: [f32; 3]| bevy::math::Vec3::from_array(p);
-        for triangle in geometry.indices.chunks(3) {
-            let [a, b, c] = [0, 1, 2].map(|i| triangle[i] as usize);
-            assert_eq!(
-                [a / 4, b / 4],
-                [c / 4, c / 4],
-                "a triangle stays within its quad"
-            );
-            let [pa, pb, pc] = [a, b, c].map(|i| vec(geometry.positions[i]));
-            let facing = (pb - pa).cross(pc - pa).normalize();
-            assert_eq!(
-                facing,
-                vec(geometry.normals[a]),
-                "triangle {triangle:?} winds wrong"
-            );
-        }
-
-        let mut quads: Vec<Quad> = (0..vertices / 4)
-            .map(|quad| {
-                let corners = quad * 4..quad * 4 + 4;
-                let normal = geometry.normals[quad * 4];
-                let color = geometry.colors[quad * 4];
-                assert!(
-                    geometry.normals[corners.clone()]
-                        .iter()
-                        .all(|&n| n == normal)
-                );
-                assert!(geometry.colors[corners.clone()].iter().all(|&c| c == color));
-                let positions = &geometry.positions[corners];
-                let min = [0, 1, 2].map(|axis| {
-                    positions
-                        .iter()
-                        .map(|p| p[axis])
-                        .fold(f32::INFINITY, f32::min)
-                });
-                let max = [0, 1, 2].map(|axis| {
-                    positions
-                        .iter()
-                        .map(|p| p[axis])
-                        .fold(f32::NEG_INFINITY, f32::max)
-                });
-                let flat_axis = normal.iter().position(|&n| n != 0.0).unwrap();
-                assert_eq!(
-                    min[flat_axis], max[flat_axis],
-                    "quad is flat along its normal"
-                );
-                Quad {
-                    normal,
-                    min,
-                    max,
-                    color,
-                }
-            })
-            .collect();
-        quads.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        quads
+    /// The quads of the origin Chunk's solid geometry, checked and sorted by [`quads_of`].
+    fn quads(world: &World) -> Vec<crate::render::test_support::Quad> {
+        quads_of(&mesh_solids(
+            &origin_neighbourhood(world),
+            &SolidColors::new(&elements()),
+        ))
     }
 
     const GRANITE: [f32; 4] = [0.55, 0.5, 0.5, 1.0];
     const DIRT: [f32; 4] = [0.45, 0.3, 0.18, 1.0];
-
-    /// The quads `expected` lists, all in `color`, sorted as [`quads`] sorts them.
-    fn expected_quads(color: [f32; 4], expected: &[([f32; 3], [f32; 3], [f32; 3])]) -> Vec<Quad> {
-        let mut quads: Vec<Quad> = expected
-            .iter()
-            .map(|&(normal, min, max)| Quad {
-                normal,
-                min,
-                max,
-                color,
-            })
-            .collect();
-        quads.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        quads
-    }
 
     #[test]
     fn a_single_solid_cell_has_six_outward_faces() {
