@@ -6,4 +6,5 @@
 pub mod player;
 pub mod render;
 pub mod sim_bridge;
+pub mod tools;
 pub mod world;

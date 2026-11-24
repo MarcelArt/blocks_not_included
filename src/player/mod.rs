@@ -1,18 +1,20 @@
 //! The player: a body that walks, jumps, flies and swims through the world in first person, and
 //! that the Active Region follows.
 //!
-//! Controls: click to capture the cursor, and Esc to release it. While it is captured, the mouse
-//! looks around. WASD moves, Space jumps, and F switches flying on and off. Flying goes through
+//! Controls: click the world to capture the cursor, and Esc to release it. While it is captured,
+//! the mouse looks around. WASD moves, Space jumps, and F switches flying on and off. Flying goes through
 //! solids; Space rises and Shift sinks. In a liquid, holding Space swims upward.
 
 pub mod collision;
 pub mod movement;
+pub mod raycast;
 
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy_egui::input::EguiWantsInput;
 use sim::{CHUNK_SIZE, CellPos, ChunkPos, Phase, WORLD_BOTTOM_Y, WORLD_TOP_Y};
 
 use crate::sim_bridge::{Elements, RENDER_DISTANCE, SimFocus};
@@ -48,10 +50,16 @@ impl Plugin for PlayerPlugin {
                 move_player,
                 focus_on_player,
             )
-                .chain(),
+                .chain()
+                .in_set(PlayerSystems),
         );
     }
 }
+
+/// The player's systems in `Update`. Once they have run, the cursor is captured or free, and the
+/// player has turned and moved for the frame.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlayerSystems;
 
 /// The player's body. Its entity is the camera, at the body's eyes.
 #[derive(Component, Clone, Copy, Debug, Deref, DerefMut)]
@@ -114,13 +122,20 @@ fn place_on_ground(
     info!("the player spawned at ({}, {}, {})", feet.x, feet.y, feet.z);
 }
 
-/// Captures the cursor on a click, and releases it on Esc.
+/// Captures the cursor on a click on the world, and releases it on Esc. A click on an egui panel
+/// is the panel's, so it doesn't capture. The click that captures is used up, so the systems after
+/// this one don't see it as a click.
 fn capture_cursor(
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    ui: Option<Res<EguiWantsInput>>,
 ) {
-    if mouse.just_pressed(MouseButton::Left) {
+    let on_panel = ui.is_some_and(|ui| ui.wants_any_pointer_input());
+    if cursor.grab_mode == CursorGrabMode::None
+        && !on_panel
+        && mouse.clear_just_pressed(MouseButton::Left)
+    {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
     }

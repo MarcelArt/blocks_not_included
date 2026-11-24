@@ -8,6 +8,9 @@ members = ["crates/sim", "crates/worldgen"]
 
 [dependencies]
 bevy = { version = "0.20.1", features = ["dynamic_linking"] }
+# The god tools' palette. Only what drawing it needs: no clipboard, URL opening, bevy_ui ordering
+# or picking.
+bevy_egui = { version = "0.43.1", default-features = false, features = ["render", "default_fonts"] }
 binary-greedy-meshing = "0.6.4"
 # Channels to and from the simulation thread; see `src/sim_bridge.rs` for why not `std::sync::mpsc`.
 crossbeam-channel = "0.5.17"

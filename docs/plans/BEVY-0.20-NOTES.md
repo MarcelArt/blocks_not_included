@@ -46,6 +46,17 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
   - `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))`, from `bevy::render::view::screenshot`, saves a frame.
 - **Vulkan loader errors.** Two `ERROR wgpu_hal::vulkan::instance … liblsfg-vk-layer.so` lines at startup come from a Vulkan layer installed on this laptop, not from the game. They are harmless.
 
+## Found in step 12
+
+- **`bevy_egui` 0.43.1** (egui 0.36.2) is in, with default features off except `render` and `default_fonts`. Add `EguiPlugin::default()` once, in `main.rs`; it attaches itself to the player's camera.
+  - Draw UI from a system in the `EguiPrimaryContextPass` schedule that returns `Result` and calls `contexts.ctx_mut()?`.
+  - egui 0.36 names: `egui::Panel::left/right/top/bottom` for side panels, and `Slider::from_get_set(range, |value| …)`, which shows one unit (°C) while storing another (K).
+- **Who has the pointer.** `bevy_egui::input::EguiWantsInput` is written in `PostUpdate`, so systems in `Update` see the previous frame's value. Its `wants_any_pointer_input()` is already true while the pointer only hovers over a window.
+- **Captured cursor and egui.** On X11 the hidden cursor still moves, and egui would let it hover over and press a window. Draw windows with `.interactable(false)` while the cursor is captured: egui's hit-testing skips them, so egui never wants the pointer.
+- **Using up a click.** `ButtonInput::clear_just_pressed(button)` hides the press from systems that run later in the frame. `capture_cursor` uses it.
+- **Gizmos.** `gizmos.cube(transform, color)` and `gizmos.sphere(Isometry3d::from_translation(centre), radius, color)`, drawn from `Update`.
+- **Agent checks.** Presses made on `ButtonInput` don't reach egui, which reads input messages. In a window without focus, `Window::cursor_position()` is `None`.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.
