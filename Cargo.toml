@@ -6,6 +6,12 @@ edition = "2024"
 [workspace]
 members = ["crates/sim", "crates/worldgen"]
 
+[features]
+default = ["dev"]
+# For development builds: Bevy watches `assets/`, so editing the simulation's data files changes
+# the running game (src/sim_files.rs). Build a release with `--no-default-features`.
+dev = ["bevy/file_watcher"]
+
 [dependencies]
 bevy = { version = "0.20.1", features = ["dynamic_linking"] }
 # The god tools' palette. Only what drawing it needs: no clipboard, URL opening, bevy_ui ordering

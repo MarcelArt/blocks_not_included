@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use blocks_not_included::sim_bridge::{
-    SimBridge, SimBridgePlugin, SimCommand, SimFocus, SimReport,
+    Elements, ReplaceOutcome, SimBridge, SimBridgePlugin, SimCommand, SimFocus, SimReport,
 };
 use blocks_not_included::world::WorldView;
 use sim::{
-    CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, Element, ElementId, ElementTable,
-    SimSettings,
+    CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, Element, ElementError, ElementId,
+    ElementTable, SimSettings,
 };
 
 /// Far longer than anything here should take, so a slow machine doesn't fail a test.
@@ -204,6 +204,84 @@ fn pause_stops_the_tick_count_and_step_advances_it_by_exactly_one() {
     update_until(&mut app, "the clock runs again", |app| {
         tick(app) >= paused_at + 3
     });
+}
+
+/// Every [`ReplaceOutcome`] the app has received, oldest first.
+#[derive(Resource, Default)]
+struct Outcomes(Vec<ReplaceOutcome>);
+
+/// `app_with`, recording every [`ReplaceOutcome`] in [`Outcomes`].
+fn app_recording_outcomes(source: Box<dyn ChunkSource>) -> App {
+    let mut app = app_with(source);
+    app.init_resource::<Outcomes>().add_systems(
+        Update,
+        |mut outcomes: MessageReader<ReplaceOutcome>, mut seen: ResMut<Outcomes>| {
+            seen.0.extend(outcomes.read().cloned());
+        },
+    );
+    app
+}
+
+/// Sends `command`, then runs frames until the simulation's answer arrives, and returns it.
+fn answer_to(app: &mut App, command: SimCommand) -> ReplaceOutcome {
+    let before = app.world().resource::<Outcomes>().0.len();
+    send(app, command);
+    update_until(app, "the simulation answers", |app| {
+        app.world().resource::<Outcomes>().0.len() > before
+    });
+    app.world().resource::<Outcomes>().0[before].clone()
+}
+
+#[test]
+fn an_accepted_element_table_replaces_elements_and_a_rejected_one_leaves_it() {
+    let mut app = app_recording_outcomes(Box::new(VacuumSource));
+    let elements = |app: &App| app.world().resource::<Elements>().0.clone();
+
+    // Renaming TestRock is rejected: Cells may hold it.
+    let mut renamed = ElementTable::new();
+    renamed.add(Element::new("Basalt").density(1_000.0).specific_heat(1.0));
+    let rejected = answer_to(&mut app, SimCommand::ReplaceElements(renamed));
+
+    assert_eq!(
+        rejected,
+        ReplaceOutcome::Elements(Err(ElementError::MissingElement {
+            element: "TestRock".into()
+        }))
+    );
+    assert!(elements(&app).id_of("TestRock").is_some());
+    assert!(elements(&app).id_of("Basalt").is_none());
+
+    // Appending an Element is accepted.
+    let (mut appended, rock) = tiny_elements();
+    let sand = appended.add(Element::new("TestSand").density(1_500.0).specific_heat(1.0));
+    let accepted = answer_to(&mut app, SimCommand::ReplaceElements(appended));
+
+    assert_eq!(accepted, ReplaceOutcome::Elements(Ok(())));
+    assert_eq!(elements(&app).id_of("TestRock"), Some(rock));
+    assert_eq!(elements(&app).id_of("TestSand"), Some(sand));
+}
+
+#[test]
+fn replaced_settings_are_answered_and_invalid_ones_are_rejected() {
+    let mut app = app_recording_outcomes(Box::new(VacuumSource));
+
+    // Above 0.5, a pair of gas Cells would overshoot.
+    let overshooting = SimSettings {
+        gas_evening_out_fraction: 0.9,
+        ..SimSettings::default()
+    };
+    let rejected = answer_to(&mut app, SimCommand::ReplaceSettings(overshooting));
+    let faster_heat = SimSettings {
+        conduction_multiplier: 10.0,
+        ..SimSettings::default()
+    };
+    let accepted = answer_to(&mut app, SimCommand::ReplaceSettings(faster_heat));
+
+    let ReplaceOutcome::Settings(Err(error)) = rejected else {
+        panic!("expected a rejection, got {rejected:?}");
+    };
+    assert_eq!(error.setting, "gas_evening_out_fraction");
+    assert_eq!(accepted, ReplaceOutcome::Settings(Ok(())));
 }
 
 #[test]

@@ -1,10 +1,12 @@
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
+use blocks_not_included::debug_panel::DebugPanelPlugin;
 use blocks_not_included::overlay::OverlayPlugin;
 use blocks_not_included::player::PlayerPlugin;
 use blocks_not_included::readout::ReadoutPlugin;
 use blocks_not_included::render::{ChunkMeshPlugin, ScenePlugin};
 use blocks_not_included::sim_bridge::SimBridgePlugin;
+use blocks_not_included::sim_files::SimFilesPlugin;
 use blocks_not_included::tools::GodToolsPlugin;
 
 fn main() {
@@ -12,6 +14,7 @@ fn main() {
         .add_plugins((
             DefaultPlugins,
             SimBridgePlugin::sandbox(),
+            SimFilesPlugin,
             ChunkMeshPlugin,
             ScenePlugin,
             PlayerPlugin,
@@ -19,6 +22,7 @@ fn main() {
             GodToolsPlugin,
             OverlayPlugin,
             ReadoutPlugin,
+            DebugPanelPlugin,
         ))
         .run();
 }

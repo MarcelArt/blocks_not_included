@@ -2,7 +2,8 @@
 //!
 //! The game sends the simulation thread [`SimCommand`]s. The thread sends back the Cells of every
 //! Chunk within render distance that loads or changes, and where the Active Region is whenever it
-//! moves, which the game keeps in [`WorldView`], and a [`SimReport`] after every Tick.
+//! moves, which the game keeps in [`WorldView`], and a [`SimReport`] after every Tick. It answers
+//! a replaced Element table or settings with a [`ReplaceOutcome`].
 //!
 //! # The simulation thread
 //!
@@ -17,6 +18,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::ops::ControlFlow;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -28,11 +30,13 @@ use bevy::prelude::*;
 // with, is stable. Bevy depends on it already, so it costs no extra build time.
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use sim::{
-    ActiveRegion, CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, ElementTable, Phase,
-    SimSettings, SimStats, Simulation, WORLD_BOTTOM_Y, WORLD_TOP_Y,
+    ActiveRegion, CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, ElementError,
+    ElementTable, Phase, SettingsError, SimSettings, SimStats, Simulation, WORLD_BOTTOM_Y,
+    WORLD_TOP_Y,
 };
 use worldgen::Generator;
 
+use crate::sim_files::{ElementsFile, SettingsFile, SimFile};
 use crate::world::{WorldView, locate};
 
 /// The seed the Sim Sandbox world is generated from.
@@ -50,6 +54,9 @@ pub const RENDER_DISTANCE: RenderDistance = RenderDistance {
 
 /// How often the game logs how the simulation is doing.
 const LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How much real time each measurement of [`TickRate`] covers.
+const TICK_RATE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the game asks of the simulation thread. The thread handles commands in the order they
 /// were sent, and every pending one before each Tick.
@@ -71,6 +78,12 @@ pub enum SimCommand {
     Resume,
     /// While the clock is stopped, runs exactly one Tick. Ignored while it runs.
     Step,
+    /// Replaces the Element table, as [`Simulation::replace_elements`] does. The answer arrives
+    /// as a [`ReplaceOutcome`], and [`Elements`] holds the table once it is accepted.
+    ReplaceElements(ElementTable),
+    /// Replaces the tuning values, as [`Simulation::set_settings`] does. The answer arrives as a
+    /// [`ReplaceOutcome`].
+    ReplaceSettings(SimSettings),
     /// Ends the simulation thread. [`SimBridge`] sends this itself when the app exits.
     Shutdown,
 }
@@ -92,6 +105,21 @@ pub struct SimReport {
     pub tick_duration: Duration,
     pub stats: SimStats,
 }
+
+/// The simulation's answer to a [`SimCommand::ReplaceElements`] or
+/// [`SimCommand::ReplaceSettings`], sent as a message on the frame it arrives. A rejected table or
+/// settings leaves the simulation as it was.
+#[derive(Message, Clone, Debug, PartialEq)]
+pub enum ReplaceOutcome {
+    /// By the time this arrives, [`Elements`] holds an accepted table.
+    Elements(Result<(), ElementError>),
+    Settings(Result<(), SettingsError>),
+}
+
+/// The Ticks per second the simulation achieved over the latest [`TICK_RATE_INTERVAL`] of real
+/// time. It is 0 until the first measurement, and while the clock is stopped.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct TickRate(pub f64);
 
 /// The focus (`CONTEXT.md`): the Cell the Active Region is centred on. The bridge sends the
 /// simulation every change, and keeps render distance around the focus's Chunk.
@@ -142,18 +170,23 @@ impl SimBridgePlugin {
     /// If either file can't be read or parsed, or the Elements lack one the world is made of.
     pub fn sandbox() -> Self {
         let assets = FileAssetReader::new("assets").root_path().clone();
-        let read = |name: &str| {
-            let path = assets.join(name);
-            fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("can't read {}: {err}", path.display()))
-        };
-        let elements = ElementTable::from_ron(&read("elements.ron"))
-            .unwrap_or_else(|err| panic!("assets/elements.ron: {err}"));
-        let settings = ron::from_str(&read("sim_settings.ron"))
-            .unwrap_or_else(|err| panic!("assets/sim_settings.ron: {err}"));
+        let ElementsFile(elements) = read_sim_file(&assets);
+        let SettingsFile(settings) = read_sim_file(&assets);
         let generator = Generator::new(WORLD_SEED, &elements).unwrap_or_else(|err| panic!("{err}"));
         Self::new(elements, settings, Box::new(generator))
     }
+}
+
+/// Reads and parses `F` from the `assets` folder at `assets`.
+///
+/// # Panics
+///
+/// If the file can't be read, or can't be used.
+fn read_sim_file<F: SimFile>(assets: &Path) -> F {
+    let path = assets.join(F::PATH);
+    let bytes =
+        fs::read(&path).unwrap_or_else(|err| panic!("can't read {}: {err}", path.display()));
+    F::parse(&bytes).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
 }
 
 impl Plugin for SimBridgePlugin {
@@ -177,8 +210,10 @@ impl Plugin for SimBridgePlugin {
             .insert_resource(SimBridge::spawn(elements, settings, source))
             .init_resource::<WorldView>()
             .init_resource::<SimReport>()
+            .init_resource::<TickRate>()
+            .add_message::<ReplaceOutcome>()
             .add_systems(First, receive_updates)
-            .add_systems(Update, log_progress)
+            .add_systems(Update, (measure_tick_rate, log_progress).chain())
             .add_systems(PostUpdate, follow_focus)
             .add_systems(Last, shut_down_on_exit);
     }
@@ -240,12 +275,15 @@ impl Drop for SimBridge {
     }
 }
 
-/// Moves everything the simulation thread has sent into [`WorldView`] and [`SimReport`], and
-/// starts the frame's record of changed Chunks.
+/// Moves everything the simulation thread has sent into [`WorldView`], [`SimReport`] and
+/// [`Elements`], passes its answers on as [`ReplaceOutcome`]s, and starts the frame's record of
+/// changed Chunks.
 fn receive_updates(
     mut bridge: ResMut<SimBridge>,
     mut view: ResMut<WorldView>,
     mut report: ResMut<SimReport>,
+    mut elements: ResMut<Elements>,
+    mut outcomes: MessageWriter<ReplaceOutcome>,
 ) {
     if view.has_changes() {
         view.clear_changes();
@@ -257,6 +295,19 @@ fn receive_updates(
             Ok(SimUpdate::ChunkLeftView(pos)) => view.remove(pos),
             Ok(SimUpdate::ActiveRegion(region)) => view.set_active_region(region),
             Ok(SimUpdate::Report(latest)) => *report = latest,
+            Ok(SimUpdate::ElementsReplaced(answer)) => {
+                let answer = match answer {
+                    Ok(table) => {
+                        elements.0 = table;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                outcomes.write(ReplaceOutcome::Elements(answer));
+            }
+            Ok(SimUpdate::SettingsReplaced(answer)) => {
+                outcomes.write(ReplaceOutcome::Settings(answer));
+            }
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 // The thread has ended unasked, which only a panic or a `SimCommand::Shutdown`
@@ -289,26 +340,41 @@ fn follow_focus(focus: Res<SimFocus>, bridge: Res<SimBridge>, mut centre: Local<
     }
 }
 
+/// Every [`TICK_RATE_INTERVAL`], measures the Ticks per second achieved since the last time.
+fn measure_tick_rate(
+    time: Res<Time<Real>>,
+    report: Res<SimReport>,
+    mut rate: ResMut<TickRate>,
+    mut measured: Local<Option<(Duration, u64)>>,
+) {
+    let now = time.elapsed();
+    let (measured_at, measured_tick) = *measured.get_or_insert((now, report.tick));
+    let elapsed = now - measured_at;
+    if elapsed >= TICK_RATE_INTERVAL {
+        *measured = Some((now, report.tick));
+        rate.0 = report.tick.saturating_sub(measured_tick) as f64 / elapsed.as_secs_f64();
+    }
+}
+
 /// Every [`LOG_INTERVAL`], logs the Ticks per second achieved and the simulation's stats.
 fn log_progress(
     time: Res<Time<Real>>,
     report: Res<SimReport>,
+    rate: Res<TickRate>,
     view: Res<WorldView>,
-    mut logged: Local<Option<(Duration, u64)>>,
+    mut logged_at: Local<Option<Duration>>,
 ) {
     let now = time.elapsed();
-    let (logged_at, logged_tick) = *logged.get_or_insert((now, report.tick));
-    let elapsed = now - logged_at;
-    if elapsed < LOG_INTERVAL {
+    if now - *logged_at.get_or_insert(now) < LOG_INTERVAL {
         return;
     }
-    *logged = Some((now, report.tick));
-    let ticks_per_second = report.tick.saturating_sub(logged_tick) as f64 / elapsed.as_secs_f64();
+    *logged_at = Some(now);
     let stats = report.stats;
     info!(
-        "sim: {ticks_per_second:.1} Ticks/s; Tick {} took {:.1} ms; \
+        "sim: {:.1} Ticks/s; Tick {} took {:.1} ms; \
          Chunks: {} active ({} Settled), {} Dormant, {} in view; \
          total Mass {:.3} kg, {} g lost to space",
+        rate.0,
         report.tick,
         report.tick_duration.as_secs_f64() * 1_000.0,
         stats.active_chunks,
@@ -360,6 +426,11 @@ enum SimUpdate {
     /// The Active Region has moved here.
     ActiveRegion(ActiveRegion),
     Report(SimReport),
+    /// The answer to a [`SimCommand::ReplaceElements`]: the table now in use, or why it was
+    /// rejected.
+    ElementsReplaced(Result<ElementTable, ElementError>),
+    /// The answer to a [`SimCommand::ReplaceSettings`].
+    SettingsReplaced(Result<(), SettingsError>),
 }
 
 /// All the Cells of a Chunk within render distance that has loaded or changed.
@@ -477,6 +548,14 @@ impl SimThread {
             }
             SimCommand::Step if self.paused => self.tick(),
             SimCommand::Resume | SimCommand::Step => {}
+            SimCommand::ReplaceElements(elements) => {
+                let answer = self.sim.replace_elements(elements.clone());
+                self.send(SimUpdate::ElementsReplaced(answer.map(|()| elements)));
+            }
+            SimCommand::ReplaceSettings(settings) => {
+                let answer = self.sim.set_settings(settings);
+                self.send(SimUpdate::SettingsReplaced(answer));
+            }
             SimCommand::Shutdown => return ControlFlow::Break(()),
         }
         ControlFlow::Continue(())

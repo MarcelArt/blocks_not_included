@@ -86,6 +86,17 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
   - `egui::Rgba::from_rgb` takes linear colours, and `Color32::from(rgba)` converts them for display.
 - **Agent checks.** `Query<(), (With<Player>, Without<AwaitingSpawn>)>::single().is_ok()` tells a harness when the player has spawned. Allow about 30 s after spawn before measuring frame times: render distance is still loading and meshing before then, and frames run 20–25 ms.
 
+## Found in step 15
+
+- **Hot reload.** The game crate's default `dev` feature turns on `bevy/file_watcher`, so `cargo run` watches `assets/`. The watcher waits 300 ms for a burst of file events to end before reloading.
+- **Two loaders for one extension.** Both simulation files are `.ron`. Their loaders claim no extension, and `AssetServer::load::<A>(path)` then chooses the loader by asset type alone.
+- **Failed reloads.**
+  - A reload that fails writes an `AssetLoadFailedEvent<A>` message, and the asset keeps its previous value in `Assets<A>`. The next successful reload writes `AssetEvent::Modified`, not `Added`.
+  - To show the loader's own message, without the server's wrapping (which names the loader's type), match `AssetLoadError::AssetLoaderError(e)` and call `e.error().downcast_ref::<YourError>()`.
+  - The asset server also logs its own `error!` for every failed reload. It then retries the load without the asset type, which a loader that claims no extension can't serve, and logs `Could not find an asset loader matching: Asset Type: None`. Both are harmless.
+- **Messages in tests.** To read a game `Message` from a test that drives `app.update()`, add a system that copies it into a resource: messages are cleared after two frames.
+- **egui.** `ui.add_enabled(enabled, egui::Button::new(label))` greys out a button.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.
@@ -94,4 +105,4 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 ## Running on this laptop
 
 - It has hybrid graphics (Intel plus a GTX 1650). If the adapter Bevy logs at startup is the Intel GPU, run with `prime-run cargo run`, or set `WGPU_ADAPTER_NAME` to force the NVIDIA one.
-- Hot reload of assets needs Bevy's `file_watcher` feature (step 15).
+- Hot reload of assets needs Bevy's `file_watcher` feature, which the default `dev` feature turns on (step 15). Build a release with `--no-default-features`.

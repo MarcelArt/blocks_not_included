@@ -259,6 +259,12 @@ pub enum ElementError {
     /// A listed Element is in the vacuum Phase, which belongs to the built-in Vacuum alone
     /// (`CONTEXT.md`).
     VacuumPhase { element: String },
+    /// A replacement table (step 15) lacks an Element of the current one, which Cells may hold:
+    /// it was removed or renamed.
+    MissingElement { element: String },
+    /// A replacement table (step 15) holds an Element of the current one at another position.
+    /// Cells refer to an Element by its position, from the 1-based `from` to `to`.
+    ElementMoved { element: String, from: u16, to: u16 },
 }
 
 impl fmt::Display for ElementError {
@@ -337,6 +343,16 @@ impl fmt::Display for ElementError {
             Self::VacuumPhase { element } => write!(
                 f,
                 "{element:?} is in the vacuum Phase, which only the built-in Vacuum may be"
+            ),
+            Self::MissingElement { element } => write!(
+                f,
+                "{element:?} is gone, but Cells may hold it: Elements can be appended, but not \
+                 removed or renamed"
+            ),
+            Self::ElementMoved { element, from, to } => write!(
+                f,
+                "{element:?} moved from #{from} to #{to}, but Cells refer to Elements by position: \
+                 append new Elements at the end instead"
             ),
         }
     }
@@ -515,6 +531,29 @@ impl ElementTable {
                 into: into.name.clone(),
                 opposite_k: opposite.temperature_k,
             });
+        }
+        Ok(())
+    }
+
+    /// Checks that `replacement` holds every Element of this table under the same name and at the
+    /// same position, so every [`ElementId`] issued by this table still means the same Element.
+    pub(crate) fn check_replacement(&self, replacement: &ElementTable) -> Result<(), ElementError> {
+        for (id, element) in self.listed() {
+            match replacement.id_of(&element.name) {
+                None => {
+                    return Err(ElementError::MissingElement {
+                        element: element.name.clone(),
+                    });
+                }
+                Some(moved_to) if moved_to != id => {
+                    return Err(ElementError::ElementMoved {
+                        element: element.name.clone(),
+                        from: id.index(),
+                        to: moved_to.index(),
+                    });
+                }
+                Some(_) => {}
+            }
         }
         Ok(())
     }

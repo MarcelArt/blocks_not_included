@@ -175,14 +175,19 @@ fn three_significant_digits(amount: f64) -> String {
         &rounded
     };
     let (whole, fraction) = rounded.split_at(rounded.find('.').unwrap_or(rounded.len()));
+    group_thousands(whole) + fraction
+}
+
+/// The whole number written in `digits`, with commas between thousands: "1,234,567".
+pub(crate) fn group_thousands(digits: &str) -> String {
     let mut grouped = String::new();
-    for (i, digit) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(digit);
     }
-    grouped + fraction
+    grouped
 }
 
 #[cfg(test)]

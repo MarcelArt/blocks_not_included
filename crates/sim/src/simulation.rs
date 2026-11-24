@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::cell::{Cell, CellPos};
 use crate::chunk::{ActiveChunks, CHUNK_VOLUME, Chunk, ChunkPos, locate};
 use crate::edit::Edit;
-use crate::element::{ElementId, ElementTable};
+use crate::element::{ElementError, ElementId, ElementTable};
 use crate::region::{ActiveRegion, Placement, is_in_world};
 use crate::settings::{SettingsError, SimSettings};
 use crate::settled::TickStart;
@@ -145,6 +145,25 @@ impl Simulation {
 
     pub fn settings(&self) -> &SimSettings {
         &self.settings
+    }
+
+    /// Replaces the Element table, which takes effect from the next Tick, and wakes every Chunk,
+    /// since a Chunk at rest under the old properties may not be under the new ones.
+    ///
+    /// Cells store their Element as an [`ElementId`], its position in the table. So `elements`
+    /// must hold every Element of the current table, under the same name and at the same
+    /// position; it may change their properties, and append new Elements after them. Otherwise it
+    /// is rejected with [`ElementError::MissingElement`] or [`ElementError::ElementMoved`], and
+    /// the current table stays.
+    ///
+    /// Like [`new`](Self::new), this doesn't [validate](ElementTable::validate) the table.
+    pub fn replace_elements(&mut self, elements: ElementTable) -> Result<(), ElementError> {
+        self.elements.check_replacement(&elements)?;
+        self.elements = elements;
+        for chunk in self.active.values_mut() {
+            chunk.settled = false;
+        }
+        Ok(())
     }
 
     /// Sets how many threads each Tick is split across, from the next Tick on; 0 counts as 1.

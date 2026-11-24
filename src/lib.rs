@@ -3,10 +3,12 @@
 //!
 //! Vocabulary is defined in `CONTEXT.md` at the repository root.
 
+pub mod debug_panel;
 pub mod overlay;
 pub mod player;
 pub mod readout;
 pub mod render;
 pub mod sim_bridge;
+pub mod sim_files;
 pub mod tools;
 pub mod world;
