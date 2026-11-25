@@ -23,6 +23,14 @@ impl Cell {
         mass_grams: 0,
         temperature_k: 0.0,
     };
+
+    /// Whether this Cell is exactly `other`, down to the bits of its temperature: unlike `==`,
+    /// it tells 0 K from −0 K, and NaN is identical to itself.
+    pub(crate) fn is_identical(&self, other: &Cell) -> bool {
+        self.element == other.element
+            && self.mass_grams == other.mass_grams
+            && self.temperature_k.to_bits() == other.temperature_k.to_bits()
+    }
 }
 
 /// A Cell's position in the world grid.

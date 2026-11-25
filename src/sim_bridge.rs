@@ -3,7 +3,13 @@
 //! The game sends the simulation thread [`SimCommand`]s. The thread sends back the Cells of every
 //! Chunk within render distance that loads or changes, and where the Active Region is whenever it
 //! moves, which the game keeps in [`WorldView`], and a [`SimReport`] after every Tick. It answers
-//! a replaced Element table or settings with a [`ReplaceOutcome`].
+//! a replaced Element table or settings with a [`ReplaceOutcome`], and a request for a capture
+//! with a [`SimCapture`], on a channel of its own.
+//!
+//! # Starting
+//!
+//! The simulation starts from a fresh world ([`SimBridgePlugin::new`],
+//! [`SimBridgePlugin::generated`]) or from a capture ([`SimBridgePlugin::restore`]).
 //!
 //! # The simulation thread
 //!
@@ -30,11 +36,11 @@ use bevy::prelude::*;
 // with, is stable. Bevy depends on it already, so it costs no extra build time.
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use sim::{
-    ActiveRegion, CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, ElementError,
-    ElementTable, Phase, SettingsError, SimSettings, SimStats, Simulation, WORLD_BOTTOM_Y,
-    WORLD_TOP_Y,
+    ActiveRegion, CHUNK_SIZE, Cell, CellPos, Checkpoint, CheckpointError, ChunkPos, ChunkSource,
+    Edit, ElementError, ElementTable, Phase, SettingsError, SimSettings, SimStats, Simulation,
+    WORLD_BOTTOM_Y, WORLD_TOP_Y,
 };
-use worldgen::Generator;
+use worldgen::{Generator, MissingElements};
 
 use crate::sim_files::{ElementsFile, SettingsFile, SimFile};
 use crate::world::{WorldView, locate};
@@ -84,6 +90,9 @@ pub enum SimCommand {
     /// Replaces the tuning values, as [`Simulation::set_settings`] does. The answer arrives as a
     /// [`ReplaceOutcome`].
     ReplaceSettings(SimSettings),
+    /// Captures the simulation, once every command sent before has been handled, and sends the
+    /// [`SimCapture`] on this channel. [`SimBridge::capture`] sends this for you.
+    Capture(Sender<SimCapture>),
     /// Ends the simulation thread. [`SimBridge`] sends this itself when the app exits.
     Shutdown,
 }
@@ -132,6 +141,44 @@ pub struct SimFocus(pub CellPos);
 #[derive(Resource, Clone, Debug, Deref)]
 pub struct Elements(pub ElementTable);
 
+/// What a generated world's terrain comes from: its World Seed, and the Element table the world
+/// generator was built with.
+///
+/// Hot reloads of the simulation's Elements leave it as it is, so every Chunk the generator makes
+/// matches the ones it made before, which a [`Checkpoint`] relies on (ADR 0005).
+#[derive(Clone, Debug)]
+pub struct Generation {
+    pub seed: u64,
+    pub elements: ElementTable,
+}
+
+impl Generation {
+    /// The world generator these inputs make.
+    pub fn generator(&self) -> Result<Generator, MissingElements> {
+        Generator::new(self.seed, &self.elements)
+    }
+}
+
+/// The simulation captured between two Ticks, as [`SimBridge::capture`] answers: its
+/// [`Checkpoint`], with the rules it ran under and, for a generated world, what its terrain comes
+/// from. [`SimBridgePlugin::restore`] starts the simulation from it again.
+///
+/// It is owned: nothing the simulation does afterwards changes it, so it can be encoded and
+/// written anywhere, at any pace.
+#[derive(Clone, Debug)]
+pub struct SimCapture {
+    pub checkpoint: Checkpoint,
+    /// The Element table the simulation ran with: the last one it accepted, or the one it
+    /// started with.
+    pub elements: ElementTable,
+    /// The tuning values the simulation ran with: the last ones it accepted, or the ones it
+    /// started with.
+    pub settings: SimSettings,
+    /// What the world generator was built from, which reloads don't change. `None` for a world
+    /// from another [`ChunkSource`].
+    pub generation: Option<Generation>,
+}
+
 /// Runs the simulation on a thread of its own, steers it with [`SimFocus`] and render distance,
 /// and keeps [`WorldView`] and [`SimReport`] up to date.
 pub struct SimBridgePlugin {
@@ -140,9 +187,22 @@ pub struct SimBridgePlugin {
 }
 
 struct Setup {
+    /// The Element table the simulation starts with, for [`Elements`].
     elements: ElementTable,
-    settings: SimSettings,
-    source: Box<dyn ChunkSource>,
+    generation: Option<Generation>,
+    start: Start,
+}
+
+/// How the simulation thread gets its simulation.
+enum Start {
+    /// It makes a new one, whose Chunks come from `source`.
+    Fresh {
+        elements: ElementTable,
+        settings: SimSettings,
+        source: Box<dyn ChunkSource>,
+    },
+    /// It takes this one, restored from a checkpoint.
+    Restored(Box<Simulation>),
 }
 
 impl SimBridgePlugin {
@@ -152,14 +212,62 @@ impl SimBridgePlugin {
         settings: SimSettings,
         source: Box<dyn ChunkSource>,
     ) -> Self {
-        let setup = Setup {
+        Self::starting(Setup {
+            elements: elements.clone(),
+            generation: None,
+            start: Start::Fresh {
+                elements,
+                settings,
+                source,
+            },
+        })
+    }
+
+    /// A simulation of `elements` under `settings`, in a world generated from `seed` and
+    /// `elements`. The generator keeps these Elements whatever the simulation reloads later, and
+    /// every [`SimCapture`] holds them in its [`Generation`].
+    ///
+    /// Fails if `elements` lacks one the world is made of.
+    pub fn generated(
+        seed: u64,
+        elements: ElementTable,
+        settings: SimSettings,
+    ) -> Result<Self, MissingElements> {
+        let generation = Generation { seed, elements };
+        let generator = generation.generator()?;
+        Ok(Self::starting(Setup {
+            elements: generation.elements.clone(),
+            start: Start::Fresh {
+                elements: generation.elements.clone(),
+                settings,
+                source: Box::new(generator),
+            },
+            generation: Some(generation),
+        }))
+    }
+
+    /// The simulation `capture` holds, restored with its own rules, and with `source` for the
+    /// Chunks it leaves to the world generator. For a generated world, that is the generator its
+    /// [`Generation`] makes. The focus starts where the capture's was.
+    ///
+    /// The capture is checked against its rules and `source` first, as [`Simulation::restore`]
+    /// does, and a capture that fails is rejected before any simulation starts.
+    pub fn restore(
+        capture: SimCapture,
+        source: Box<dyn ChunkSource>,
+    ) -> Result<Self, CheckpointError> {
+        let SimCapture {
+            checkpoint,
             elements,
             settings,
-            source,
-        };
-        Self {
-            setup: Mutex::new(Some(setup)),
-        }
+            generation,
+        } = capture;
+        let sim = Simulation::restore(elements.clone(), settings, source, checkpoint)?;
+        Ok(Self::starting(Setup {
+            elements,
+            generation,
+            start: Start::Restored(Box::new(sim)),
+        }))
     }
 
     /// The Sim Sandbox: Elements from `assets/elements.ron`, settings from
@@ -172,8 +280,13 @@ impl SimBridgePlugin {
         let assets = FileAssetReader::new("assets").root_path().clone();
         let ElementsFile(elements) = read_sim_file(&assets);
         let SettingsFile(settings) = read_sim_file(&assets);
-        let generator = Generator::new(WORLD_SEED, &elements).unwrap_or_else(|err| panic!("{err}"));
-        Self::new(elements, settings, Box::new(generator))
+        Self::generated(WORLD_SEED, elements, settings).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn starting(setup: Setup) -> Self {
+        Self {
+            setup: Mutex::new(Some(setup)),
+        }
     }
 }
 
@@ -193,21 +306,30 @@ impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         let Setup {
             elements,
-            settings,
-            source,
+            generation,
+            start,
         } = self
             .setup
             .lock()
             .ok()
             .and_then(|mut setup| setup.take())
             .expect("SimBridgePlugin is built only once");
-        if let Err(err) = settings.validate() {
-            panic!("invalid simulation settings: {err}");
-        }
-        let focus = just_above_surface(&*source, &elements, 0, 0);
-        app.insert_resource(Elements(elements.clone()))
+        let focus = match &start {
+            Start::Fresh {
+                elements,
+                settings,
+                source,
+            } => {
+                if let Err(err) = settings.validate() {
+                    panic!("invalid simulation settings: {err}");
+                }
+                just_above_surface(&**source, elements, 0, 0)
+            }
+            Start::Restored(sim) => sim.focus(),
+        };
+        app.insert_resource(Elements(elements))
             .insert_resource(SimFocus(focus))
-            .insert_resource(SimBridge::spawn(elements, settings, source))
+            .insert_resource(SimBridge::spawn(start, generation))
             .init_resource::<WorldView>()
             .init_resource::<SimReport>()
             .init_resource::<TickRate>()
@@ -231,16 +353,26 @@ pub struct SimBridge {
 
 impl SimBridge {
     /// Starts the simulation thread.
-    fn spawn(elements: ElementTable, settings: SimSettings, source: Box<dyn ChunkSource>) -> Self {
+    fn spawn(start: Start, generation: Option<Generation>) -> Self {
         let (commands, command_receiver) = crossbeam_channel::unbounded();
         let (update_sender, updates) = crossbeam_channel::unbounded();
         let thread = thread::Builder::new()
             .name("sim".into())
             .spawn(move || {
-                let mut sim = Simulation::with_source(elements, source);
-                sim.set_settings(settings)
-                    .expect("SimBridgePlugin validated the settings");
-                SimThread::new(sim, command_receiver, update_sender).run();
+                let sim = match start {
+                    Start::Fresh {
+                        elements,
+                        settings,
+                        source,
+                    } => {
+                        let mut sim = Simulation::with_source(elements, source);
+                        sim.set_settings(settings)
+                            .expect("SimBridgePlugin validated the settings");
+                        sim
+                    }
+                    Start::Restored(sim) => *sim,
+                };
+                SimThread::new(sim, generation, command_receiver, update_sender).run();
             })
             .expect("the simulation thread starts");
         Self {
@@ -254,6 +386,17 @@ impl SimBridge {
     pub fn send(&self, command: SimCommand) {
         // Sending fails only once the thread has ended, when there is nothing left to do.
         let _ = self.commands.send(command);
+    }
+
+    /// Asks the simulation for a [`SimCapture`], taken once it has handled every command sent
+    /// before this one, and returns the channel it arrives on. It arrives between two Ticks.
+    ///
+    /// Wait for it away from the game's schedule, such as on the thread that encodes and writes
+    /// it. If the simulation thread has ended, the channel is disconnected and nothing arrives.
+    pub fn capture(&self) -> Receiver<SimCapture> {
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        self.send(SimCommand::Capture(reply));
+        answer
     }
 
     /// Shuts the simulation thread down, and waits for it to end.
@@ -442,6 +585,8 @@ struct ChunkUpdate {
 /// The simulation thread: the simulation, its clock, and what the game has been sent.
 struct SimThread {
     sim: Simulation,
+    /// What the world generator was built from, for captures.
+    generation: Option<Generation>,
     commands: Receiver<SimCommand>,
     updates: Sender<SimUpdate>,
     paused: bool,
@@ -467,9 +612,15 @@ enum Wait {
 }
 
 impl SimThread {
-    fn new(sim: Simulation, commands: Receiver<SimCommand>, updates: Sender<SimUpdate>) -> Self {
+    fn new(
+        sim: Simulation,
+        generation: Option<Generation>,
+        commands: Receiver<SimCommand>,
+        updates: Sender<SimUpdate>,
+    ) -> Self {
         Self {
             sim,
+            generation,
             commands,
             updates,
             paused: false,
@@ -556,9 +707,23 @@ impl SimThread {
                 let answer = self.sim.set_settings(settings);
                 self.send(SimUpdate::SettingsReplaced(answer));
             }
+            SimCommand::Capture(reply) => {
+                // Sending fails only if the asker has stopped waiting.
+                let _ = reply.send(self.capture());
+            }
             SimCommand::Shutdown => return ControlFlow::Break(()),
         }
         ControlFlow::Continue(())
+    }
+
+    /// The simulation as it stands, with its rules and what its terrain comes from.
+    fn capture(&self) -> SimCapture {
+        SimCapture {
+            checkpoint: self.sim.checkpoint(),
+            elements: self.sim.elements().clone(),
+            settings: self.sim.settings().clone(),
+            generation: self.generation.clone(),
+        }
     }
 
     /// Moves the focus to `pos`, and logs where the Active Region goes if it moves.

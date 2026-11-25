@@ -35,7 +35,10 @@ fn file(entries: &[String]) -> String {
 fn rejection_naming(offender: &str, text: &str) -> ElementError {
     let error = ElementTable::from_ron(text).expect_err("the file should be rejected");
     let message = error.to_string();
-    assert!(message.contains(offender), "{message:?} doesn't name {offender}");
+    assert!(
+        message.contains(offender),
+        "{message:?} doesn't name {offender}"
+    );
     error
 }
 
@@ -71,7 +74,10 @@ fn a_transition_into_an_unknown_element_is_rejected() {
 
     let error = rejection_naming("Water", &text);
 
-    assert!(matches!(error, ElementError::UnknownTarget { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::UnknownTarget { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -86,37 +92,61 @@ fn a_file_that_lists_vacuum_is_rejected() {
 
 #[test]
 fn duplicate_names_are_rejected() {
-    let text = file(&[element("Water", "Liquid", ""), element("Water", "Solid", "")]);
+    let text = file(&[
+        element("Water", "Liquid", ""),
+        element("Water", "Solid", ""),
+    ]);
 
     let error = rejection_naming("Water", &text);
 
-    assert!(matches!(error, ElementError::DuplicateName { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::DuplicateName { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
 fn a_missing_hysteresis_gap_is_rejected() {
     // Water at 373.5 K would boil into Steam, which at 373.5 K (< 374 K) condenses straight back.
     let text = file(&[
-        element("Water", "Liquid", r#"high: Some((temperature_k: 373.15, into: "Steam"))"#),
-        element("Steam", "Gas", r#"low: Some((temperature_k: 374.0, into: "Water"))"#),
+        element(
+            "Water",
+            "Liquid",
+            r#"high: Some((temperature_k: 373.15, into: "Steam"))"#,
+        ),
+        element(
+            "Steam",
+            "Gas",
+            r#"low: Some((temperature_k: 374.0, into: "Water"))"#,
+        ),
     ]);
 
     let error = rejection_naming("Water", &text);
 
-    assert!(matches!(error, ElementError::NoHysteresisGap { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::NoHysteresisGap { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
 fn a_wrong_direction_transition_is_rejected() {
     // Cooling a liquid must condense it, but this turns Water into a gas.
     let text = file(&[
-        element("Water", "Liquid", r#"low: Some((temperature_k: 272.15, into: "Steam"))"#),
+        element(
+            "Water",
+            "Liquid",
+            r#"low: Some((temperature_k: 272.15, into: "Steam"))"#,
+        ),
         element("Steam", "Gas", ""),
     ]);
 
     let error = rejection_naming("Water", &text);
 
-    assert!(matches!(error, ElementError::WrongDirection { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::WrongDirection { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -129,7 +159,10 @@ fn an_element_with_zero_density_or_zero_specific_heat_is_rejected() {
     for text in [zero_density, zero_specific_heat] {
         let error = rejection_naming("Ghost", text);
 
-        assert!(matches!(error, ElementError::InvalidProperty { .. }), "{error:?}");
+        assert!(
+            matches!(error, ElementError::InvalidProperty { .. }),
+            "{error:?}"
+        );
     }
 }
 
@@ -159,7 +192,10 @@ fn a_low_threshold_that_is_not_below_the_high_threshold_is_rejected() {
 
     let error = rejection_naming("Water", &text);
 
-    assert!(matches!(error, ElementError::LowNotBelowHigh { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::LowNotBelowHigh { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -169,7 +205,10 @@ fn a_listed_element_in_the_vacuum_phase_is_rejected() {
 
     let error = rejection_naming("Void", &text);
 
-    assert!(matches!(error, ElementError::VacuumPhase { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::VacuumPhase { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -183,7 +222,10 @@ fn a_transition_into_vacuum_is_rejected() {
 
     let error = rejection_naming("Hydrogen", &text);
 
-    assert!(matches!(error, ElementError::WrongDirection { .. }), "{error:?}");
+    assert!(
+        matches!(error, ElementError::WrongDirection { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -278,7 +320,11 @@ impl SettledPair {
 
         run_ticks(&mut sim, 1, &invariants);
 
-        assert_eq!(sim.stats().settled_chunks, 1, "the pair's Chunk should be Settled");
+        assert_eq!(
+            sim.stats().settled_chunks,
+            1,
+            "the pair's Chunk should be Settled"
+        );
         Self {
             sim,
             hot,
@@ -288,7 +334,10 @@ impl SettledPair {
     }
 
     fn temperatures(&self) -> [f32; 2] {
-        [self.sim.get(self.hot).temperature_k, self.sim.get(self.cold).temperature_k]
+        [
+            self.sim.get(self.hot).temperature_k,
+            self.sim.get(self.cold).temperature_k,
+        ]
     }
 }
 
@@ -320,7 +369,10 @@ fn an_element_appended_at_the_end_is_accepted_and_cells_can_hold_it() {
 
     assert_eq!(replaced, Ok(()));
     let [warm, cool] = [warm, cool].map(|pos| pair.sim.get(pos).temperature_k);
-    assert!(warm < 350.0 && cool > 250.0, "Silt conducts: {warm} K and {cool} K");
+    assert!(
+        warm < 350.0 && cool > 250.0,
+        "Silt conducts: {warm} K and {cool} K"
+    );
     // Rock still conducts no heat.
     assert_eq!(pair.temperatures(), [400.0, 300.0]);
 }
@@ -350,7 +402,12 @@ fn a_reordered_renamed_or_removed_element_is_rejected_and_the_old_table_stays() 
             },
             "Rock",
         ),
-        ("renamed", table(&["Rock", "Silt", "Clay"]), missing_sand(), "Sand"),
+        (
+            "renamed",
+            table(&["Rock", "Silt", "Clay"]),
+            missing_sand(),
+            "Sand",
+        ),
         ("removed", table(&["Rock", "Clay"]), missing_sand(), "Sand"),
     ];
 
@@ -363,7 +420,10 @@ fn a_reordered_renamed_or_removed_element_is_rejected_and_the_old_table_stays() 
         let error = replaced.expect_err(change);
         assert_eq!(error, expected, "{change}");
         let message = error.to_string();
-        assert!(message.contains(offender), "{change}: {message:?} doesn't name {offender}");
+        assert!(
+            message.contains(offender),
+            "{change}: {message:?} doesn't name {offender}"
+        );
         // Rock still conducts no heat.
         assert_eq!(pair.temperatures(), [400.0, 300.0], "{change}");
     }

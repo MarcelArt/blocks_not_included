@@ -3,6 +3,7 @@
 //! Vocabulary is defined in `CONTEXT.md` at the repository root.
 
 mod cell;
+mod checkpoint;
 mod chunk;
 mod displacement;
 mod edit;
@@ -19,6 +20,7 @@ mod simulation;
 mod transfer;
 
 pub use cell::{Cell, CellPos};
+pub use checkpoint::{Checkpoint, CheckpointError, ChunkCheckpoint, ChunkContents};
 pub use chunk::{CHUNK_SIZE, ChunkPos};
 pub use edit::Edit;
 pub use element::{Element, ElementError, ElementId, ElementTable, Phase, Side, Transition};

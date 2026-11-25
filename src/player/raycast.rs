@@ -26,7 +26,10 @@ pub fn raycast(
     max_distance: f32,
     is_target: impl Fn(IVec3) -> bool,
 ) -> Option<Hit> {
-    debug_assert!(max_distance.is_finite(), "a ray of endless reach never ends");
+    debug_assert!(
+        max_distance.is_finite(),
+        "a ray of endless reach never ends"
+    );
     let mut cell = origin.floor().as_ivec3();
     if is_target(cell) {
         return Some(Hit {
@@ -93,7 +96,14 @@ mod tests {
 
     #[test]
     fn a_cell_straight_ahead_is_hit_through_the_face_facing_the_origin() {
-        for direction in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+        for direction in [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ] {
             // Three Cells ahead of the origin's Cell, (0, 0, 0), along this axis.
             let target = direction * 3;
             let hit = raycast(centre_of(0, 0, 0), direction.as_vec3(), REACH, |cell| {
@@ -130,7 +140,10 @@ mod tests {
         let target_at = |x: i32| move |cell: IVec3| cell == IVec3::new(x, 0, 0);
         // From the centre of (0, 0, 0) along +x, the Cell at x = 9 starts 8.5 m away, past the
         // 8 m reach.
-        assert_eq!(raycast(centre_of(0, 0, 0), Vec3::X, REACH, target_at(9)), None);
+        assert_eq!(
+            raycast(centre_of(0, 0, 0), Vec3::X, REACH, target_at(9)),
+            None
+        );
         // The Cell at x = 8 starts 7.5 m away, within it.
         let hit = raycast(centre_of(0, 0, 0), Vec3::X, REACH, target_at(8));
         assert_eq!(hit.map(|hit| hit.cell), Some(IVec3::new(8, 0, 0)));

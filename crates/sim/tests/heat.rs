@@ -147,8 +147,16 @@ fn a_tiny_cell_never_ends_up_hotter_than_the_huge_cells_heating_it() {
 #[test]
 fn the_poorer_conductor_limits_heat_flow_between_unlike_elements() {
     let mut elements = ElementTable::new();
-    let good = elements.add(Element::new("GoodConductor").specific_heat(1.0).conductivity(1_000.0));
-    let poor = elements.add(Element::new("PoorConductor").specific_heat(1.0).conductivity(1.0));
+    let good = elements.add(
+        Element::new("GoodConductor")
+            .specific_heat(1.0)
+            .conductivity(1_000.0),
+    );
+    let poor = elements.add(
+        Element::new("PoorConductor")
+            .specific_heat(1.0)
+            .conductivity(1.0),
+    );
     let mut sim = Simulation::new(elements);
     // Two pairs, far apart with Vacuum between them, so they can't affect each other.
     let (mixed_hot, mixed_cold) = (CellPos::new(0, 0, 0), CellPos::new(1, 0, 0));
@@ -195,7 +203,12 @@ fn heat_spreads_equally_in_every_direction() {
         CellPos::new(0, 0, -1),
     ]
     .map(|pos| sim.get(pos).temperature_k);
-    let spread = face_neighbours.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+    let spread = face_neighbours
+        .iter()
+        .fold(f32::NEG_INFINITY, |a, &b| a.max(b))
         - face_neighbours.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-    assert!(spread < 1e-4, "face neighbours warmed unequally: {face_neighbours:?}");
+    assert!(
+        spread < 1e-4,
+        "face neighbours warmed unequally: {face_neighbours:?}"
+    );
 }

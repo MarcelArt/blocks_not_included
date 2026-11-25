@@ -11,12 +11,13 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use blocks_not_included::sim_bridge::{
-    Elements, ReplaceOutcome, SimBridge, SimBridgePlugin, SimCommand, SimFocus, SimReport,
+    Elements, ReplaceOutcome, SimBridge, SimBridgePlugin, SimCapture, SimCommand, SimFocus,
+    SimReport,
 };
 use blocks_not_included::world::WorldView;
 use sim::{
-    CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, Edit, Element, ElementError, ElementId,
-    ElementTable, SimSettings,
+    CHUNK_SIZE, Cell, CellPos, CheckpointError, ChunkContents, ChunkPos, ChunkSource, Edit,
+    Element, ElementError, ElementId, ElementTable, Phase, SimSettings,
 };
 
 /// Far longer than anything here should take, so a slow machine doesn't fail a test.
@@ -391,4 +392,266 @@ fn the_world_view_holds_the_active_region_and_follows_it_as_the_focus_moves() {
     update_until(&mut app, "the Active Region follows the focus", |app| {
         active_region(app) == Some((ChunkPos::new(29, -1, -2), ChunkPos::new(32, 0, 1)))
     });
+}
+
+/// Asks the simulation for a capture and waits for it.
+fn capture(app: &App) -> SimCapture {
+    app.world()
+        .resource::<SimBridge>()
+        .capture()
+        .recv_timeout(TIMEOUT)
+        .expect("the capture arrives")
+}
+
+/// The Cell at `pos` as `capture` holds it: `None` unless its Chunk holds Cells.
+fn captured_cell(capture: &SimCapture, pos: CellPos) -> Option<Cell> {
+    let chunk = ChunkPos::of(pos);
+    let ChunkContents::Cells(cells) = &capture.checkpoint.chunks.get(&chunk)?.contents else {
+        return None;
+    };
+    let origin = chunk.origin();
+    let (x, y, z) = (
+        (pos.x - origin.x) as usize,
+        (pos.y - origin.y) as usize,
+        (pos.z - origin.z) as usize,
+    );
+    // Cells are listed x fastest, then z, then y.
+    Some(cells[(y * CHUNK_SIZE + z) * CHUNK_SIZE + x])
+}
+
+#[test]
+fn a_capture_includes_every_edit_sent_before_it_and_no_later_one() {
+    let (_, rock) = tiny_elements();
+    let mut app = app_with(Box::new(VacuumSource));
+    // Two Cells of one Chunk.
+    let (earlier, later) = (CellPos::new(3, 5, -7), CellPos::new(4, 5, -7));
+    let placed = rock_cell(rock);
+
+    send(
+        &app,
+        SimCommand::Edit(Edit::Place {
+            pos: earlier,
+            cell: placed,
+        }),
+    );
+    let answer = app.world().resource::<SimBridge>().capture();
+    send(
+        &app,
+        SimCommand::Edit(Edit::Place {
+            pos: later,
+            cell: placed,
+        }),
+    );
+    let captured = answer.recv_timeout(TIMEOUT).expect("the capture arrives");
+    update_until(&mut app, "the later Edit shows up", |app| {
+        app.world().resource::<WorldView>().cell(later) == Some(placed)
+    });
+
+    // The capture is the game's own: the later Edit, applied since, doesn't reach it.
+    assert_eq!(captured_cell(&captured, earlier), Some(placed));
+    assert_eq!(captured_cell(&captured, later), Some(Cell::VACUUM));
+}
+
+/// TestRock, then a TestGas that conducts no heat.
+fn rock_and_gas() -> (ElementTable, ElementId) {
+    let (mut elements, _) = tiny_elements();
+    let gas = elements.add(
+        Element::new("TestGas")
+            .phase(Phase::Gas)
+            .density(1.0)
+            .specific_heat(1.0),
+    );
+    (elements, gas)
+}
+
+/// An app simulating `elements` in a world of Vacuum, with the clock stopped before any Tick.
+fn paused_app(app: App) -> App {
+    // The first Tick is due a whole Tick interval after the thread starts.
+    send(&app, SimCommand::Pause);
+    app
+}
+
+/// Runs one Tick with the clock stopped, and waits for its report.
+fn step(app: &mut App) {
+    let before = tick(app);
+    send(app, SimCommand::Step);
+    update_until(app, "the Step's Tick", |app| tick(app) > before);
+}
+
+#[test]
+fn a_restored_simulation_carries_on_through_the_bridge_as_the_captured_one_does() {
+    let (elements, gas) = rock_and_gas();
+    let mut played = App::new();
+    played.add_plugins((
+        MinimalPlugins,
+        SimBridgePlugin::new(elements, SimSettings::default(), Box::new(VacuumSource)),
+    ));
+    let mut played = paused_app(played);
+    // A release of gas, spreading into Vacuum in ways the Tick count breaks ties for.
+    let release = CellPos::new(3, 3, 3);
+    let gas_cell = Cell {
+        element: gas,
+        mass_grams: 100_000,
+        temperature_k: 300.0,
+    };
+    send(
+        &played,
+        SimCommand::Edit(Edit::Place {
+            pos: release,
+            cell: gas_cell,
+        }),
+    );
+    for _ in 0..3 {
+        step(&mut played);
+    }
+    let captured = capture(&played);
+    assert_eq!(captured.checkpoint.tick_count, 3);
+
+    let restored = SimBridgePlugin::restore(captured, Box::new(VacuumSource)).expect("restored");
+    let mut resumed = App::new();
+    resumed.add_plugins((MinimalPlugins, restored));
+    let mut resumed = paused_app(resumed);
+    step(&mut played);
+    step(&mut resumed);
+
+    let report = |app: &App| *app.world().resource::<SimReport>();
+    assert_eq!(report(&resumed).stats, report(&played).stats);
+    assert_eq!(report(&resumed).tick, 4);
+    let chunk = ChunkPos::of(release);
+    update_until(&mut resumed, "the Tick's Cells arrive", |app| {
+        let view = app.world().resource::<WorldView>();
+        view.chunk(chunk).is_some() && view.cell(release) != Some(gas_cell)
+    });
+    let cells = |app: &App| app.world().resource::<WorldView>().chunk(chunk).cloned();
+    assert!(cells(&resumed) == cells(&played), "the Cells differ");
+}
+
+#[test]
+fn a_capture_holds_the_last_accepted_rules_and_the_generators_startup_elements() {
+    let startup = ElementTable::from_ron(include_str!("../assets/elements.ron"))
+        .expect("the shipped Elements are valid");
+    let granite = startup.id_of("Granite").unwrap();
+    let plugin = SimBridgePlugin::generated(7, startup.clone(), SimSettings::default())
+        .expect("the shipped Elements are enough");
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, plugin))
+        .init_resource::<Outcomes>()
+        .add_systems(
+            Update,
+            |mut outcomes: MessageReader<ReplaceOutcome>, mut seen: ResMut<Outcomes>| {
+                seen.0.extend(outcomes.read().cloned());
+            },
+        );
+    // Granite conducts 100 times better, then a rename is rejected.
+    let mut conductive = ElementTable::new();
+    let mut renamed = ElementTable::new();
+    for (id, element) in startup.iter().skip(1) {
+        let mut element = element.clone();
+        if id == granite {
+            element.conductivity *= 100.0;
+        }
+        conductive.add(element.clone());
+        if id == granite {
+            element.name = "Basalt".into();
+        }
+        renamed.add(element);
+    }
+    let conductive_k = conductive.get(granite).conductivity;
+    let accepted = SimSettings {
+        conduction_multiplier: 10.0,
+        ..SimSettings::default()
+    };
+    let overshooting = SimSettings {
+        gas_evening_out_fraction: 0.9,
+        ..SimSettings::default()
+    };
+    for (command, accept) in [
+        (SimCommand::ReplaceElements(conductive), true),
+        (SimCommand::ReplaceElements(renamed), false),
+        (SimCommand::ReplaceSettings(accepted.clone()), true),
+        (SimCommand::ReplaceSettings(overshooting), false),
+    ] {
+        let outcome = answer_to(&mut app, command);
+        let accepted = matches!(
+            outcome,
+            ReplaceOutcome::Elements(Ok(())) | ReplaceOutcome::Settings(Ok(()))
+        );
+        assert_eq!(accepted, accept, "{outcome:?}");
+    }
+
+    let captured = capture(&app);
+
+    let check = |captured: &SimCapture| {
+        assert_eq!(captured.elements.get(granite).conductivity, conductive_k);
+        assert_eq!(captured.settings, accepted);
+        let generation = captured.generation.as_ref().expect("a generated world");
+        assert_eq!(generation.seed, 7);
+        assert_eq!(
+            generation.elements.get(granite).conductivity,
+            startup.get(granite).conductivity
+        );
+    };
+    check(&captured);
+    // Restored with the generator rebuilt from its own inputs, the rules and the generator's
+    // inputs carry over.
+    let generator = captured
+        .generation
+        .as_ref()
+        .unwrap()
+        .generator()
+        .expect("the startup Elements are enough");
+    let restored = SimBridgePlugin::restore(captured, Box::new(generator)).expect("restored");
+    let mut resumed = App::new();
+    resumed.add_plugins((MinimalPlugins, restored));
+    check(&capture(&resumed));
+    assert_eq!(
+        resumed
+            .world()
+            .resource::<Elements>()
+            .get(granite)
+            .conductivity,
+        conductive_k
+    );
+}
+
+#[test]
+fn a_malformed_capture_is_rejected_and_no_simulation_starts() {
+    let (_, rock) = tiny_elements();
+    let app = app_with(Box::new(VacuumSource));
+    send(&app, SimCommand::Pause);
+    let pos = CellPos::new(3, 5, -7);
+    send(
+        &app,
+        SimCommand::Edit(Edit::Place {
+            pos,
+            cell: rock_cell(rock),
+        }),
+    );
+    let mut captured = capture(&app);
+    // A Cell of rock with no Mass.
+    let ChunkContents::Cells(cells) = &mut captured
+        .checkpoint
+        .chunks
+        .get_mut(&ChunkPos::of(pos))
+        .expect("listed")
+        .contents
+    else {
+        panic!("no Cells");
+    };
+    let placed = cells.iter_mut().find(|cell| cell.element == rock).unwrap();
+    placed.mass_grams = 0;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let source = DropRecordingSource {
+        dropped: Arc::clone(&dropped),
+    };
+
+    let restored = SimBridgePlugin::restore(captured, Box::new(source));
+
+    assert!(
+        matches!(restored, Err(CheckpointError::InvalidMass { .. })),
+        "{:?}",
+        restored.err()
+    );
+    // The source went with the rejected checkpoint: no simulation holds it.
+    assert!(dropped.load(Ordering::SeqCst));
 }

@@ -197,7 +197,11 @@ pub(super) fn draw_palette(
         .show(contexts.ctx_mut()?, |ui| {
             ui.horizontal(|ui| {
                 for (number, tool) in (1..).zip(Tool::ALL) {
-                    ui.selectable_value(&mut edited.tool, tool, format!("{number} {}", tool.name()));
+                    ui.selectable_value(
+                        &mut edited.tool,
+                        tool,
+                        format!("{number} {}", tool.name()),
+                    );
                 }
             });
             ui.separator();
@@ -286,7 +290,10 @@ fn cell_picker(ui: &mut egui::Ui, cell: &mut Cell, tool: Tool, elements: &Elemen
     for (transition, past) in [(&element.low, "below"), (&element.high, "above")] {
         if let Some(transition) = transition {
             let celsius = transition.temperature_k - ZERO_CELSIUS_K;
-            ui.weak(format!("Becomes {} {past} {celsius:.2} °C.", transition.into));
+            ui.weak(format!(
+                "Becomes {} {past} {celsius:.2} °C.",
+                transition.into
+            ));
         }
     }
 }
@@ -298,11 +305,7 @@ mod tests {
     /// Water, Ice, Steam and Oxygen, with the thresholds of `assets/elements.ron`.
     fn elements() -> ElementTable {
         let mut elements = ElementTable::new();
-        elements.add(
-            Element::new("Oxygen")
-                .phase(Phase::Gas)
-                .density(1.43),
-        );
+        elements.add(Element::new("Oxygen").phase(Phase::Gas).density(1.43));
         elements.add(
             Element::new("Water")
                 .phase(Phase::Liquid)

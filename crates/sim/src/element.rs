@@ -538,17 +538,30 @@ impl ElementTable {
     /// Checks that `replacement` holds every Element of this table under the same name and at the
     /// same position, so every [`ElementId`] issued by this table still means the same Element.
     pub(crate) fn check_replacement(&self, replacement: &ElementTable) -> Result<(), ElementError> {
-        for (id, element) in self.listed() {
-            match replacement.id_of(&element.name) {
+        replacement.check_holds(
+            self.listed()
+                .map(|(id, element)| (usize::from(id.index()), element.name.as_str())),
+        )
+    }
+
+    /// Checks that this table holds an Element called each of `names` at the position given with
+    /// it, reporting the first one it doesn't with [`ElementError::MissingElement`] or
+    /// [`ElementError::ElementMoved`].
+    pub(crate) fn check_holds<'a>(
+        &self,
+        names: impl IntoIterator<Item = (usize, &'a str)>,
+    ) -> Result<(), ElementError> {
+        for (position, name) in names {
+            match self.id_of(name) {
                 None => {
                     return Err(ElementError::MissingElement {
-                        element: element.name.clone(),
+                        element: name.to_owned(),
                     });
                 }
-                Some(moved_to) if moved_to != id => {
+                Some(moved_to) if usize::from(moved_to.index()) != position => {
                     return Err(ElementError::ElementMoved {
-                        element: element.name.clone(),
-                        from: id.index(),
+                        element: name.to_owned(),
+                        from: u16::try_from(position).unwrap_or(u16::MAX),
                         to: moved_to.index(),
                     });
                 }

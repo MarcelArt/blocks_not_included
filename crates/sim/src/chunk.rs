@@ -127,21 +127,45 @@ pub(crate) struct Chunk {
     pub settled: bool,
     /// Whether any of its Cells has changed during the current Tick.
     pub touched: bool,
+    /// Whether any of its Cells has changed since it was loaded, so it may no longer hold what
+    /// its source generated. Unlike `touched`, it stays set, and unlike the simulation's list of
+    /// changed Chunks, nothing outside the simulation clears it: a checkpoint saves the Chunk's
+    /// Cells only if this is set.
+    pub modified: bool,
+    /// The [`fingerprint`] of the Cells its source generated, so a checkpoint can tell cheaply
+    /// whether a modified Chunk has come back to exactly those. `None` if they aren't known: for
+    /// a Chunk restored from a checkpoint's Cells.
+    pub baseline: Option<u64>,
 }
 
 impl Chunk {
-    /// An awake Chunk of Vacuum.
+    /// An awake Chunk of Vacuum, as loaded where the source generated nothing but Vacuum.
     pub fn new() -> Self {
-        Self::from_cells(vec![Cell::VACUUM; CHUNK_VOLUME])
+        Self::generated(vec![Cell::VACUUM; CHUNK_VOLUME])
     }
 
-    /// An awake Chunk of `cells`, which must number `CHUNK_VOLUME`.
-    pub fn from_cells(cells: Vec<Cell>) -> Self {
+    /// An awake Chunk of `cells` as its source generated them. They must number `CHUNK_VOLUME`.
+    pub fn generated(cells: Vec<Cell>) -> Self {
+        debug_assert_eq!(cells.len(), CHUNK_VOLUME);
+        Self {
+            baseline: Some(fingerprint(&cells)),
+            cells: cells.into_boxed_slice(),
+            settled: false,
+            touched: false,
+            modified: false,
+        }
+    }
+
+    /// An awake Chunk of `cells` restored from a checkpoint, which may differ from what its
+    /// source generates. They must number `CHUNK_VOLUME`.
+    pub fn restored(cells: Vec<Cell>) -> Self {
         debug_assert_eq!(cells.len(), CHUNK_VOLUME);
         Self {
             cells: cells.into_boxed_slice(),
             settled: false,
             touched: false,
+            modified: true,
+            baseline: None,
         }
     }
 
@@ -152,11 +176,27 @@ impl Chunk {
         !self.settled || self.touched
     }
 
-    /// Overwrites the Cell at `index`, marking this Chunk touched if the Cell changed.
+    /// Overwrites the Cell at `index`, marking this Chunk touched and modified if the Cell
+    /// changed.
     pub fn write(&mut self, index: usize, cell: Cell) {
         if self.cells[index] != cell {
             self.cells[index] = cell;
             self.touched = true;
+            self.modified = true;
         }
     }
+}
+
+/// A fingerprint of `cells` that takes in every bit of every Cell: equal Cells always give equal
+/// fingerprints, and different Cells almost never do. It is only ever compared within one run of
+/// the game, so it may change between versions.
+pub(crate) fn fingerprint(cells: &[Cell]) -> u64 {
+    // FxHash's mixing step: cheap, and good enough for telling Cells apart, since a match is
+    // always confirmed Cell by Cell.
+    let mix =
+        |hash: u64, word: u64| (hash.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    cells.iter().fold(0, |hash, cell| {
+        let word = u64::from(cell.element.index()) << 32 | u64::from(cell.mass_grams);
+        mix(mix(hash, word), u64::from(cell.temperature_k.to_bits()))
+    })
 }

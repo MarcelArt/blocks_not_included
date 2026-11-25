@@ -115,18 +115,36 @@ pub(crate) struct Placement {
 impl Placement {
     /// The box of `size` Chunks best centred on `focus`.
     pub fn around(focus: CellPos, size: [u32; 3]) -> Self {
-        let size = size.map(|chunks| {
-            i32::try_from(chunks).expect("SimSettings::validate keeps the size in range")
-        });
-        let [x, y, z] = size;
+        let placement = Self::at(ChunkPos::new(0, 0, 0), size);
+        let [x, y, z] = placement.size;
         Self {
             min: ChunkPos::new(
                 best_centred(focus.x, x),
                 best_centred(focus.y, y),
                 best_centred(focus.z, z),
             ),
-            size,
+            ..placement
         }
+    }
+
+    /// The box of `size` Chunks starting at the Chunk `min`.
+    pub fn at(min: ChunkPos, size: [u32; 3]) -> Self {
+        Self {
+            min,
+            size: size.map(|chunks| {
+                i32::try_from(chunks).expect("SimSettings::validate keeps the size in range")
+            }),
+        }
+    }
+
+    /// The box's Chunk with the smallest x, y and z.
+    pub fn min(self) -> ChunkPos {
+        self.min
+    }
+
+    /// How many Chunks the box spans along x, y and z.
+    pub fn size(self) -> [u32; 3] {
+        self.size.map(|chunks| chunks.unsigned_abs())
     }
 
     /// The box that follows the focus to `focus`: this one, along each axis where the focus is no

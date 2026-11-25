@@ -29,7 +29,7 @@ Steps 01–08 can be tested without opening a window. From step 10 on, each step
 
 | Step | Crate | Status |
 |---|---|---|
-| [16 Simulation checkpoint](16-simulation-checkpoint.md) | sim, worldgen, game | planned |
+| [16 Simulation checkpoint](16-simulation-checkpoint.md) | sim, worldgen, game | done |
 | [17 World save storage and catalog](17-world-save-storage.md) | game | planned |
 | [18 World sessions and pause](18-world-sessions.md) | game | planned |
 | [19 Main menu and saving in play](19-menus-and-saving.md) | game | planned |

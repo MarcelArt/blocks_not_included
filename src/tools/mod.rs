@@ -184,7 +184,10 @@ fn set_up_palette(mut commands: Commands, elements: Res<Elements>) {
 
 /// Number keys 1–4 choose a tool.
 fn choose_tool(keys: Res<ButtonInput<KeyCode>>, mut palette: ResMut<Palette>) {
-    if let Some(tool) = Tool::ALL.into_iter().find(|tool| keys.just_pressed(tool.key())) {
+    if let Some(tool) = Tool::ALL
+        .into_iter()
+        .find(|tool| keys.just_pressed(tool.key()))
+    {
         palette.tool = tool;
     }
 }
@@ -247,7 +250,10 @@ fn use_tool(
                 let kelvin = palette.brush_strength * seconds;
                 let mut shifted = 0;
                 for cell in brush_cells(hit.cell, palette.brush_radius) {
-                    if cells.get(cell).is_some_and(|c| c.element != ElementId::VACUUM) {
+                    if cells
+                        .get(cell)
+                        .is_some_and(|c| c.element != ElementId::VACUUM)
+                    {
                         editor.send(Edit::ShiftTemperature {
                             pos: cell_pos(cell),
                             kelvin,

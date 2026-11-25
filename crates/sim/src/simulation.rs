@@ -1,7 +1,8 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::cell::{Cell, CellPos};
-use crate::chunk::{ActiveChunks, CHUNK_VOLUME, Chunk, ChunkPos, locate};
+use crate::checkpoint::{Checkpoint, CheckpointError, ChunkCheckpoint, ChunkContents};
+use crate::chunk::{ActiveChunks, CHUNK_VOLUME, Chunk, ChunkPos, fingerprint, locate};
 use crate::edit::Edit;
 use crate::element::{ElementError, ElementId, ElementTable};
 use crate::region::{ActiveRegion, Placement, is_in_world};
@@ -67,6 +68,9 @@ pub struct SimStats {
 /// before and from the [`ChunkSource`] otherwise. Chunks outside it are Dormant: their time is
 /// stopped, and the Active Region's edge is sealed, so no Mass or heat crosses into them
 /// (ADR 0001). A Cell in a Chunk that isn't loaded reads as Vacuum.
+///
+/// Between Ticks, [`checkpoint`](Self::checkpoint) captures it, and [`restore`](Self::restore)
+/// builds a simulation from a checkpoint that carries on exactly as it would have.
 pub struct Simulation {
     elements: ElementTable,
     settings: SimSettings,
@@ -122,6 +126,139 @@ impl Simulation {
         };
         sim.move_region(placement.region());
         sim
+    }
+
+    /// The simulation `checkpoint` captured, restored with `elements` and `settings` as its rules
+    /// and `source` for every Chunk the checkpoint leaves to it. Given the rules and the source
+    /// the checkpoint was captured with, it carries on exactly as the captured simulation would
+    /// have. Every stored Chunk counts as changed, for [`take_changed_chunks`](Self::take_changed_chunks).
+    ///
+    /// Dormant Chunks the source can regenerate aren't in a checkpoint, so they load from the
+    /// source when they are needed. Until then, they are missing from
+    /// [`stats`](Self::stats)' Dormant Chunks and total Mass, and their Cells read as Vacuum.
+    ///
+    /// `elements` must hold every Element the checkpoint names, at the same position, and may
+    /// append more, as [`replace_elements`](Self::replace_elements) allows. Like
+    /// [`new`](Self::new), this doesn't [validate](ElementTable::validate) the table.
+    ///
+    /// Rejects a checkpoint that doesn't fit the rules or the source, or that breaks the Cell
+    /// invariants, before anything is built. The source is asked for the Chunks of the Active
+    /// Region the checkpoint leaves to it, as [`with_source`](Self::with_source) would.
+    pub fn restore(
+        elements: ElementTable,
+        settings: SimSettings,
+        source: Box<dyn ChunkSource>,
+        checkpoint: Checkpoint,
+    ) -> Result<Self, CheckpointError> {
+        settings.validate().map_err(CheckpointError::Settings)?;
+        elements
+            .check_holds(checkpoint.element_positions())
+            .map_err(CheckpointError::Elements)?;
+        if checkpoint.placement_chunks != settings.active_region_chunks {
+            return Err(CheckpointError::RegionSize {
+                checkpoint: checkpoint.placement_chunks,
+                settings: settings.active_region_chunks,
+            });
+        }
+        let placement = Placement::at(checkpoint.placement_min, checkpoint.placement_chunks);
+        if placement.follow(checkpoint.focus) != placement {
+            return Err(CheckpointError::RegionAwayFromFocus {
+                focus: checkpoint.focus,
+                placement_min: checkpoint.placement_min,
+            });
+        }
+        let region = placement.region();
+        checkpoint.validate_chunks(region)?;
+
+        let mut sim = Self {
+            elements,
+            settings,
+            source,
+            active: ActiveChunks::new(region),
+            dormant: HashMap::new(),
+            vacuum_only: HashSet::new(),
+            focus: checkpoint.focus,
+            placement,
+            ticks: checkpoint.tick_count,
+            changed: BTreeSet::new(),
+            mass_lost_to_space_grams: checkpoint.mass_lost_to_space_grams,
+            threads: DEFAULT_THREADS,
+            pool: None,
+        };
+        for (pos, listed) in checkpoint.chunks {
+            let mut chunk = match listed.contents {
+                ChunkContents::Generated => sim
+                    .generate_cells(pos)
+                    .map_or_else(Chunk::new, Chunk::generated),
+                ChunkContents::Vacuum => Chunk::restored(vec![Cell::VACUUM; CHUNK_VOLUME]),
+                ChunkContents::Cells(cells) => Chunk::restored(cells),
+            };
+            chunk.settled = listed.settled;
+            sim.changed.insert(pos);
+            if region.contains(pos) {
+                sim.active.insert(pos, chunk);
+            } else {
+                sim.dormant.insert(pos, chunk);
+            }
+        }
+        for pos in region.chunks() {
+            if !sim.active.contains_key(&pos) {
+                if sim.generate_cells(pos).is_some() {
+                    return Err(CheckpointError::MissingChunk { chunk: pos });
+                }
+                sim.vacuum_only.insert(pos);
+            }
+        }
+        Ok(sim)
+    }
+
+    /// Captures the simulation as it stands, between Ticks, for [`restore`](Self::restore).
+    ///
+    /// It holds the Cells of every Chunk that has changed since it was loaded, by Ticks or by
+    /// Edits, active or Dormant, unless it has come back to exactly what the source generates. A
+    /// Chunk that holds nothing but Vacuum, where the source generates something else, holds no
+    /// Cells but [`ChunkContents::Vacuum`]. It holds no Cells of any other Chunk.
+    ///
+    /// [`take_changed_chunks`](Self::take_changed_chunks) doesn't affect it.
+    pub fn checkpoint(&self) -> Checkpoint {
+        let mut chunks = BTreeMap::new();
+        for (&pos, chunk) in self.active.iter() {
+            let listed = ChunkCheckpoint {
+                contents: self.contents(pos, chunk),
+                settled: chunk.settled,
+            };
+            chunks.insert(pos, listed);
+        }
+        for (&pos, chunk) in &self.dormant {
+            let contents = self.contents(pos, chunk);
+            if contents != ChunkContents::Generated {
+                // Whether a Dormant Chunk was Settled doesn't matter: it wakes as it enters the
+                // Active Region.
+                let listed = ChunkCheckpoint {
+                    contents,
+                    settled: false,
+                };
+                chunks.insert(pos, listed);
+            }
+        }
+        Checkpoint {
+            element_names: self
+                .elements
+                .iter()
+                .map(|(_, element)| element.name.clone())
+                .collect(),
+            focus: self.focus,
+            placement_min: self.placement.min(),
+            placement_chunks: self.placement.size(),
+            tick_count: self.ticks,
+            mass_lost_to_space_grams: self.mass_lost_to_space_grams,
+            chunks,
+        }
+    }
+
+    /// The Element table the simulation runs with.
+    pub fn elements(&self) -> &ElementTable {
+        &self.elements
     }
 
     /// Replaces the tuning values, which take effect from the next Tick, and wakes every Chunk,
@@ -190,6 +327,12 @@ impl Simulation {
         self.focus = pos;
         self.placement = self.placement.follow(pos);
         self.move_region(self.placement.region());
+    }
+
+    /// The focus of the Active Region, as [`focus_on`](Self::focus_on) last moved it. It starts
+    /// at the origin.
+    pub fn focus(&self) -> CellPos {
+        self.focus
     }
 
     pub fn active_region(&self) -> ActiveRegion {
@@ -363,6 +506,17 @@ impl Simulation {
     /// Generates the never-loaded Chunk at `chunk` with the source. A Chunk of nothing but
     /// Vacuum isn't stored, so it gives `None`. Any other is listed as changed, so it gets drawn.
     fn generate(&mut self, chunk: ChunkPos) -> Option<Chunk> {
+        let Some(cells) = self.generate_cells(chunk) else {
+            self.vacuum_only.insert(chunk);
+            return None;
+        };
+        self.changed.insert(chunk);
+        Some(Chunk::generated(cells))
+    }
+
+    /// The Cells the source generates for the Chunk at `chunk`, or `None` if they are nothing but
+    /// Vacuum.
+    fn generate_cells(&self, chunk: ChunkPos) -> Option<Vec<Cell>> {
         let cells = self.source.generate(chunk);
         assert_eq!(
             cells.len(),
@@ -370,12 +524,39 @@ impl Simulation {
             "a ChunkSource must give CHUNK_SIZE³ Cells, but it gave {} for {chunk:?}",
             cells.len()
         );
-        if cells.iter().all(|cell| cell.element == ElementId::VACUUM) {
-            self.vacuum_only.insert(chunk);
-            return None;
+        let vacuum = cells.iter().all(|cell| cell.element == ElementId::VACUUM);
+        (!vacuum).then_some(cells)
+    }
+
+    /// What a checkpoint holds of `chunk`, the stored Chunk at `pos`.
+    fn contents(&self, pos: ChunkPos, chunk: &Chunk) -> ChunkContents {
+        if !chunk.modified || self.is_as_generated(pos, chunk) {
+            ChunkContents::Generated
+        } else if chunk
+            .cells
+            .iter()
+            .all(|cell| cell.is_identical(&Cell::VACUUM))
+        {
+            ChunkContents::Vacuum
+        } else {
+            ChunkContents::Cells(chunk.cells.to_vec())
         }
-        self.changed.insert(chunk);
-        Some(Chunk::from_cells(cells))
+    }
+
+    /// Whether `chunk`, the stored Chunk at `pos`, holds exactly what the source generates for
+    /// it, as it was stored when loaded. Only a fingerprint match is confirmed by generating the
+    /// Chunk again, so a Chunk that has changed rarely costs more than the fingerprint.
+    fn is_as_generated(&self, pos: ChunkPos, chunk: &Chunk) -> bool {
+        if chunk.baseline != Some(fingerprint(&chunk.cells)) {
+            return false;
+        }
+        let generated = self
+            .generate_cells(pos)
+            .unwrap_or_else(|| vec![Cell::VACUUM; CHUNK_VOLUME]);
+        generated
+            .iter()
+            .zip(&chunk.cells)
+            .all(|(generated, cell)| generated.is_identical(cell))
     }
 
     /// The stored Chunk at `chunk`, if it is loaded.
