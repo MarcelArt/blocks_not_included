@@ -44,6 +44,12 @@ _Avoid_: pushing aside, shoving
 
 ### World
 
+**World**:
+A named instance of the sandbox. Worlds can begin with the same terrain and then change independently as the player acts and the simulation runs.
+
+**World Seed**:
+The value that determines a World's initial terrain under a given set of generation rules. The same World Seed can be used to create multiple Worlds.
+
 **Chunk**:
 A fixed-size cube of Cells. It is the unit in which the world is generated, loaded and simulated.
 

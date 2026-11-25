@@ -22,3 +22,18 @@ Give these to an agent one at a time, in order, for example: "implement docs/pla
 | [15 Debug panel and hot reload](15-debug-hot-reload.md) | game, sim | done |
 
 Steps 01–08 can be tested without opening a window. From step 10 on, each step ends with a list of things for you to check in the running game.
+
+## Phase 2A
+
+[Phase scope and agreed behavior](../phase-2a-plans.md). Steps 16–18 can be checked headlessly. Steps 19–23 also have in-game checks.
+
+| Step | Crate | Status |
+|---|---|---|
+| [16 Simulation checkpoint](16-simulation-checkpoint.md) | sim, worldgen, game | planned |
+| [17 World save storage and catalog](17-world-save-storage.md) | game | planned |
+| [18 World sessions and pause](18-world-sessions.md) | game | planned |
+| [19 Main menu and saving in play](19-menus-and-saving.md) | game | planned |
+| [20 Settings and bindings](20-settings-and-bindings.md) | game | planned |
+| [21 Flight, Run, Sneak, and pool exits](21-movement-controls.md) | game | planned |
+| [22 Solid Element textures](22-solid-textures.md) | game | planned |
+| [23 Liquid Element textures](23-liquid-textures.md) | game | planned |

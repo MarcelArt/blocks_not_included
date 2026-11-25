@@ -1,6 +1,6 @@
 # Conventions for every step
 
-You are implementing one step of the Sim Sandbox milestone. Your step file is the task; this file holds the rules all steps share.
+Your step file defines the task. This file holds the rules shared by the Sim Sandbox and Phase 2A steps.
 
 ## Read first
 
