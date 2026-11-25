@@ -1,5 +1,5 @@
-//! The sky, its light, the sun, and a lamp by the camera under a roof. The camera is the
-//! player's (`crate::player`).
+//! The sky, its light, which dims where little of the sky shows, the sun, and a lamp by the
+//! camera. The camera is the player's (`crate::player`).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::CascadeShadowConfigBuilder;
@@ -9,6 +9,7 @@ use bevy::render::render_resource::{
 };
 use sim::{CHUNK_SIZE, CellPos, Phase};
 
+use crate::player::raycast::raycast;
 use crate::sim_bridge::{Elements, RENDER_DISTANCE};
 use crate::world::WorldView;
 
@@ -43,8 +44,29 @@ const SKY_LIGHT_X: f32 = 0.72;
 const SKY_LIGHT_Z: f32 = 0.56;
 const SKY_LIGHT_DOWN: f32 = 0.4;
 
-/// The lamp's luminous power, in lumens. From a metre behind the eyes, it adds about 0.2 of a
-/// face's colour 4 m ahead (200,000 / (4π × 5²) ≈ 640 lux), and a seventh of that 12 m ahead.
+/// The sky light's intensity where no sky shows at all, as when sealed in underground: dark, but
+/// every face still shows in the shade of the way it points, so the shapes of the Cells do too.
+const ENCLOSED_SKY_LIGHT_INTENSITY: f32 = 45.0;
+
+/// The share of the sky the player must see for full daylight. Beside a cliff or under an
+/// overhang, at least this much shows. Less dims the sky light towards
+/// [`ENCLOSED_SKY_LIGHT_INTENSITY`].
+const OPEN_SKY: f32 = 0.4;
+
+/// How far a ray looks for the sky, in metres. One that meets nothing solid within it counts as
+/// reaching the sky.
+const SKY_REACH: f32 = 48.0;
+
+/// How often the sky the player sees is looked for again, in seconds.
+const SKY_CHECK_INTERVAL: f32 = 0.1;
+
+/// How quickly the light follows the sky the player sees, like eyes adjusting: the share of the
+/// way it goes in a second is 1 − e^(−rate).
+const DAYLIGHT_RATE: f32 = 2.0;
+
+/// The lamp's luminous power, in lumens, where no sky shows; it fades out as daylight comes in.
+/// 0 turns it off. At 200,000, from a metre behind the eyes, it adds about 0.2 of a face's colour
+/// 4 m ahead (200,000 / (4π × 5²) ≈ 640 lux), and a seventh of that 12 m ahead.
 const LAMP_INTENSITY: f32 = 0.0;
 
 /// How far the lamp reaches, in metres.
@@ -57,15 +79,8 @@ const LAMP_OFFSET: Vec3 = Vec3::new(0.0, 0.4, 1.0);
 /// Warm, against the sky light's blue.
 const LAMP_COLOR: Color = Color::srgb(1.0, 0.95, 0.86);
 
-/// How far above the lamp a solid Cell counts as a roof, in Cells.
-const ROOF_CELLS: i32 = 24;
-
-/// How quickly the lamp comes on and goes off: the share of the way it goes in a second is
-/// 1 − e^(−rate).
-const LAMP_FADE_RATE: f32 = 4.0;
-
-/// The sky colour and its light, the sun, and the lamp that lights the player's way under a
-/// roof. Needs the sim bridge.
+/// The sky colour and its light, which dims where little of the sky shows, the sun, and the lamp
+/// that lights the player's way where the sky doesn't. Needs the sim bridge.
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
@@ -74,7 +89,7 @@ impl Plugin for ScenePlugin {
             // The sky light takes its place.
             .insert_resource(GlobalAmbientLight::NONE)
             .add_systems(Startup, (spawn_sun, make_sky_light))
-            .add_systems(Update, (light_cameras_with_the_sky, light_the_lamp));
+            .add_systems(Update, (light_cameras_with_the_sky, follow_daylight));
     }
 }
 
@@ -156,43 +171,160 @@ fn light_cameras_with_the_sky(
     cameras: Query<Entity, (With<Camera3d>, Without<EnvironmentMapLight>)>,
 ) {
     for camera in &cameras {
-        commands.entity(camera).insert(sky.0.clone()).with_child((
-            Lamp,
-            PointLight {
-                color: LAMP_COLOR,
-                // Off until it finds a roof.
-                intensity: 0.0,
-                range: LAMP_RANGE,
-                // It hangs by the eyes, so the shadows it would cast hide behind what casts them.
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::from_translation(LAMP_OFFSET),
-        ));
+        commands
+            .entity(camera)
+            .insert((sky.0.clone(), Daylight::FULL))
+            .with_child((
+                Lamp,
+                PointLight {
+                    color: LAMP_COLOR,
+                    // Off in full daylight.
+                    intensity: 0.0,
+                    range: LAMP_RANGE,
+                    // It hangs by the eyes, so the shadows it would cast hide behind what casts
+                    // them.
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(LAMP_OFFSET),
+            ));
     }
 }
 
-/// A light by a camera's eyes, which lights the way under a roof. The sky light alone shows a
-/// cave's near and far faces alike; the lamp shows the near ones brighter, so a drop stands out
-/// from the floor before it.
+/// A light by a camera's eyes, which lights the way where the sky doesn't. The sky light alone
+/// shows a cave's near and far faces alike; the lamp shows the near ones brighter, so a drop
+/// stands out from the floor before it.
 #[derive(Component)]
 struct Lamp;
 
-/// Fades each lamp on under a roof and off in the open.
-fn light_the_lamp(
+/// How much daylight reaches a camera, from 0 where no sky shows to 1 under open sky.
+#[derive(Component, Clone, Copy, Debug)]
+struct Daylight {
+    /// Eased towards `target`, as eyes adjust.
+    level: f32,
+    /// What the sky the camera last saw lets in.
+    target: f32,
+    /// When to look for the sky again, in seconds since startup.
+    next_check: f32,
+}
+
+impl Daylight {
+    const FULL: Self = Self {
+        level: 1.0,
+        target: 1.0,
+        next_check: 0.0,
+    };
+}
+
+/// Dims each camera's sky light, and brings up its lamp, as less of the sky shows from it.
+fn follow_daylight(
     time: Res<Time>,
     view: Res<WorldView>,
     elements: Res<Elements>,
-    mut lamps: Query<(&mut PointLight, &GlobalTransform), With<Lamp>>,
+    mut cameras: Query<(
+        &GlobalTransform,
+        &mut Daylight,
+        &mut EnvironmentMapLight,
+        &Children,
+    )>,
+    mut lamps: Query<&mut PointLight, With<Lamp>>,
 ) {
-    let fade = 1.0 - (-LAMP_FADE_RATE * time.delta_secs()).exp();
-    for (mut light, transform) in &mut lamps {
-        let cell = transform.translation().floor().as_ivec3();
-        let roofed = (1..=ROOF_CELLS).any(|dy| {
-            view.cell(CellPos::new(cell.x, cell.y + dy, cell.z))
-                .is_some_and(|cell| elements.0.get(cell.element).phase == Phase::Solid)
-        });
-        let target = if roofed { LAMP_INTENSITY } else { 0.0 };
-        light.intensity += (target - light.intensity) * fade;
+    let now = time.elapsed_secs();
+    let ease = 1.0 - (-DAYLIGHT_RATE * time.delta_secs()).exp();
+    let is_solid = |cell: IVec3| {
+        view.cell(CellPos::new(cell.x, cell.y, cell.z))
+            .is_some_and(|cell| elements.0.get(cell.element).phase == Phase::Solid)
+    };
+    for (transform, mut daylight, mut sky, children) in &mut cameras {
+        if now >= daylight.next_check {
+            daylight.target = daylight_from(sky_seen(transform.translation(), is_solid));
+            daylight.next_check = now + SKY_CHECK_INTERVAL;
+        }
+        daylight.level += (daylight.target - daylight.level) * ease;
+        let level = daylight.level;
+        sky.intensity = ENCLOSED_SKY_LIGHT_INTENSITY
+            + (SKY_LIGHT_INTENSITY - ENCLOSED_SKY_LIGHT_INTENSITY) * level;
+        for &child in children {
+            if let Ok(mut lamp) = lamps.get_mut(child) {
+                lamp.intensity = LAMP_INTENSITY * (1.0 - level);
+            }
+        }
+    }
+}
+
+/// The share of the sky seen from `eye`: of the rays cast up from it along [`sky_directions`],
+/// those that meet no Cell `is_solid` holds for within [`SKY_REACH`].
+fn sky_seen(eye: Vec3, is_solid: impl Fn(IVec3) -> bool) -> f32 {
+    let directions = sky_directions();
+    let open = directions
+        .iter()
+        .filter(|&&direction| raycast(eye, direction, SKY_REACH, &is_solid).is_none())
+        .count();
+    open as f32 / directions.len() as f32
+}
+
+/// The ways [`sky_seen`] looks for the sky: straight up, and six each at 60° and 35° above the
+/// horizon, at 0°, 60°, … 300° around from +x.
+fn sky_directions() -> [Vec3; 13] {
+    std::array::from_fn(|i| {
+        if i == 0 {
+            return Vec3::Y;
+        }
+        let elevation = [60.0_f32, 35.0][(i - 1) / 6].to_radians();
+        let azimuth = ((i - 1) % 6) as f32 * 60.0_f32.to_radians();
+        Vec3::new(
+            elevation.cos() * azimuth.cos(),
+            elevation.sin(),
+            elevation.cos() * azimuth.sin(),
+        )
+    })
+}
+
+/// How much daylight seeing `seen` of the sky lets in: all of it from [`OPEN_SKY`] up, easing
+/// down to none with no sky at all.
+fn daylight_from(seen: f32) -> f32 {
+    let t = (seen / OPEN_SKY).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The eyes in the middle of the Cell at the origin.
+    const EYE: Vec3 = Vec3::new(0.5, 0.5, 0.5);
+
+    #[test]
+    fn in_the_open_the_whole_sky_shows() {
+        assert_eq!(sky_seen(EYE, |_| false), 1.0);
+    }
+
+    #[test]
+    fn sealed_in_no_sky_shows() {
+        // Every Cell is solid but the one the eyes are in.
+        assert_eq!(sky_seen(EYE, |cell| cell != IVec3::ZERO), 0.0);
+        assert_eq!(daylight_from(0.0), 0.0);
+    }
+
+    #[test]
+    fn a_low_roof_hides_the_whole_sky() {
+        // Everything from 4 Cells up is solid.
+        assert_eq!(sky_seen(EYE, |cell| cell.y >= 4), 0.0);
+    }
+
+    #[test]
+    fn a_roof_out_of_reach_counts_as_sky() {
+        // Everything from 60 Cells up is solid. Straight up, the rays reach y = 48.5 at most.
+        assert_eq!(sky_seen(EYE, |cell| cell.y >= 60), 1.0);
+    }
+
+    #[test]
+    fn a_wall_on_one_side_hides_the_sky_there_but_leaves_full_daylight() {
+        // Everything from x = 3 on is solid. Of the 13 rays, the 3 in each ring that lean
+        // towards +x (at 0°, 60° and 300° around) meet it; straight up and the other 6 don't.
+        let seen = sky_seen(EYE, |cell| cell.x >= 3);
+        assert_eq!(seen, 7.0 / 13.0);
+        // Beside a cliff, under an overhang: still daylight.
+        assert_eq!(daylight_from(seen), 1.0);
     }
 }

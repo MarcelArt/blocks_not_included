@@ -62,7 +62,7 @@ Every loaded Chunk's solid Cells are drawn as flat-coloured cubes, built with `b
 
 ### Revised later: lighting in caves
 
-Caves were hard to read. Out of the sun, every face got the same flat ambient light, so a floor, the wall beside it and a drop beyond it all showed in one shade of their Element's colour. Three changes replaced the lighting decision and the deferred AO above:
+Caves were hard to read. Out of the sun, every face got the same flat ambient light, so a floor, the wall beside it and a drop beyond it all showed in one shade of their Element's colour. These changes replaced the lighting decision and the deferred AO above:
 
 - **Ambient occlusion.** Each corner of a solid face is darkened by the solid Cells that meet there, in the layer the face looks out into: to 0.76, 0.55 or 0.35 of its colour for one, two or three of them. Two Cells across the corner from each other count as three. Liquids and gases don't darken.
   - Every Cell in front of a greedy quad is open, so only the corners on its border can be darkened. A quad with any is split again, greedily, into runs whose corners match. Interpolating across each run then gives every Cell corner its exact shade.
@@ -70,7 +70,13 @@ Caves were hard to read. Out of the sun, every face got the same flat ambient li
   - The shading reads the edge and corner neighbour Chunks too. `ChunkNeighbourhood` gathers all 26 neighbours, and a Chunk goes stale when any of them changes or leaves.
   - Cost, at the dev profile's opt-level 1, on the 75 Chunks around spawn: solid meshing went from about 0.8 to 1.5 ms a Chunk, and solid meshes have 1.9 times as many vertices.
 - **Sky light by which way a face points.** An `EnvironmentMapLight` on the camera, a 1×1 cubemap, replaces the flat ambient light (`GlobalAmbientLight::NONE`). It has intensity 550 on faces pointing up, 0.72 of that on ±x, 0.56 on ±z and 0.4 on faces pointing down. Sunlit faces look much as before. In shade, floors, the two kinds of wall and ceilings each have a shade of their own.
-- **A lamp under a roof.** A point light without shadows hangs 1 m behind and 0.4 m above the eyes. It fades in while a solid Cell lies within 24 Cells above it: 200,000 lm, range 40 m, a near-white warm. Near faces then show brighter than far ones, so depth shows, such as a drop beyond a ledge. It casts no shadows: from beside the eyes, they would hide behind what casts them.
+- **Dark where the sky doesn't reach.** With the sky light everywhere, a pocket sealed in underground was as bright as shade outside.
+  - Every 0.1 s, 13 rays go up from the eyes: one straight up, and six each at 60° and 35° above the horizon. The share that meet no solid Cell within 48 m is the share of the sky seen.
+  - A share of 0.4 or more gives full daylight, so a cliff or an overhang doesn't dim anything. Below that, daylight eases (smoothstep) to none.
+  - The camera's sky light goes from 550 in full daylight to 55 with none, following daylight at a rate of 2 a second, like eyes adjusting. Sealed in, faces show at about 0.05 of their colour on floors, down to 0.02 on ceilings: dark, but every Cell's shape still shows by the shade of each face and its occlusion.
+  - Every cave near spawn, even 6 m down, counts as sealed in. The dimming is the camera's, so a cave seen from outside is lit as before, and the sunlit world seen from inside a cave dims along with it.
+- **A lamp where the sky doesn't reach.** A point light hangs 1 m behind and 0.4 m above the eyes. It comes up as daylight goes. Near faces then show brighter than far ones, so depth shows, such as a drop beyond a ledge. It casts no shadows: from beside the eyes, they would hide behind what casts them.
+  - Tried at 200,000 lm, range 40 m, in a near-white warm. It is set to 0 lm, off, for now.
 
 ## Seams and tests
 
