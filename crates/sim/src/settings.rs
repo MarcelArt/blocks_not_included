@@ -2,14 +2,14 @@
 
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Tuning values for the simulation, passed to
 /// [`Simulation::set_settings`](crate::Simulation::set_settings).
 ///
 /// A settings file may leave out any value, which then keeps its default. Every value must lie in
 /// the range its documentation gives; [`validate`](Self::validate) checks them.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SimSettings {
     /// The global speed-up for heat conduction. With real values, heat takes days to cross one

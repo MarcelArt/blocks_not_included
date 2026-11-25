@@ -1,7 +1,7 @@
 mod common;
 
 use common::{Invariants, cell, run_ticks};
-use sim::{CellPos, Element, ElementError, ElementTable, Phase, Simulation};
+use sim::{CellPos, Element, ElementError, ElementTable, Phase, SimSettings, Simulation};
 
 const SHIPPED_ELEMENTS: &str = include_str!("../../../assets/elements.ron");
 
@@ -278,6 +278,63 @@ fn steam_is_the_only_tinted_element_in_the_shipped_file() {
         let expected = if element.name == "Steam" { 0.15 } else { 0.0 };
         assert_eq!(element.tint, expected, "{}", element.name);
     }
+}
+
+#[test]
+fn a_table_written_as_an_elements_file_reads_back_identical() {
+    let shipped = ElementTable::from_ron(SHIPPED_ELEMENTS).expect("the shipped file is valid");
+    // The shipped Elements, then one with a Density whose shortest decimal form needs all nine
+    // digits, a tint, and both Transitions, so every field is written.
+    let mut table = ElementTable::new();
+    for (_, element) in shipped.iter().skip(1) {
+        table.add(element.clone());
+    }
+    let awkward_density = f32::from_bits(0x4479_8001); // 998.000061…
+    table.add(
+        Element::new("Brine")
+            .phase(Phase::Liquid)
+            .density(awkward_density)
+            .specific_heat(3.9)
+            .conductivity(0.6)
+            .tint(0.3)
+            .low(252.15, "Ice")
+            .high(380.15, "Steam"),
+    );
+
+    let read = ElementTable::from_ron(&table.to_ron()).expect("the written table is valid");
+
+    assert_eq!(read, table);
+    let brine = read.get(read.id_of("Brine").expect("Brine is listed"));
+    assert_eq!(brine.density.to_bits(), awkward_density.to_bits());
+}
+
+#[test]
+fn settings_written_as_ron_read_back_identical() {
+    let settings = SimSettings {
+        conduction_multiplier: 1_000.0,
+        // The f64 just above 0.1, whose shortest decimal form needs 17 digits.
+        gas_evening_out_fraction: f64::from_bits(0.1f64.to_bits() + 1),
+        settled_chunks_enabled: false,
+        active_region_chunks: [6, 3, 5],
+        ..SimSettings::default()
+    };
+
+    let text = ron::to_string(&settings).expect("settings serialise");
+    let read: SimSettings = ron::from_str(&text).expect("the written settings parse");
+
+    assert_eq!(read, settings);
+}
+
+#[test]
+fn an_element_id_is_found_by_its_index_only_within_its_table() {
+    let elements = ElementTable::from_ron(SHIPPED_ELEMENTS).expect("the shipped file is valid");
+
+    for (id, _) in elements.iter() {
+        assert_eq!(elements.id_at(id.index()), Some(id));
+    }
+    // Vacuum and the ten starter Elements take indices 0 to 10.
+    assert_eq!(elements.id_at(11), None);
+    assert_eq!(elements.id_at(u16::MAX), None);
 }
 
 /// A solid that conducts heat at `conductivity`, with 1 J/(g·K) so a Cell's heat capacity is its

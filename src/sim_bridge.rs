@@ -146,7 +146,7 @@ pub struct Elements(pub ElementTable);
 ///
 /// Hot reloads of the simulation's Elements leave it as it is, so every Chunk the generator makes
 /// matches the ones it made before, which a [`Checkpoint`] relies on (ADR 0005).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Generation {
     pub seed: u64,
     pub elements: ElementTable,
@@ -164,8 +164,8 @@ impl Generation {
 /// from. [`SimBridgePlugin::restore`] starts the simulation from it again.
 ///
 /// It is owned: nothing the simulation does afterwards changes it, so it can be encoded and
-/// written anywhere, at any pace.
-#[derive(Clone, Debug)]
+/// written anywhere, at any pace. [`WorldStore`](crate::saves::WorldStore) saves it to disk.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SimCapture {
     pub checkpoint: Checkpoint,
     /// The Element table the simulation ran with: the last one it accepted, or the one it

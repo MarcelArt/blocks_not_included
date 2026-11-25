@@ -47,6 +47,42 @@ const TERRAIN_CHUNKS: [ChunkPos; 3] = [
     ChunkPos::new(-5, -3, 7),
 ];
 
+/// Feeds every Cell's Element index, Mass and temperature, to the bit, into a 64-bit FNV-1a hash.
+fn fingerprint(hash: u64, cells: &[Cell]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    cells
+        .iter()
+        .flat_map(|cell| {
+            let element = cell.element.index().to_le_bytes();
+            let mass = cell.mass_grams.to_le_bytes();
+            let temperature = cell.temperature_k.to_bits().to_le_bytes();
+            [element.as_slice(), &mass, &temperature].concat()
+        })
+        .fold(hash, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
+}
+
+#[test]
+fn the_generated_terrain_is_pinned_to_the_rules_revision() {
+    // World saves regenerate untouched terrain from the World Seed (ADR 0005), so if the same
+    // seed generated other Cells, saved Worlds would change under their players. If this fails,
+    // the generator's output has changed: bump `worldgen::RULES_REVISION`, and pin the new
+    // fingerprint with it.
+    let generator = generator(2026);
+    let floor = ChunkPos::new(0, BOTTOM_CHUNK_Y, 0);
+    let sky = ChunkPos::new(0, TOP_CHUNK_Y - 1, 0);
+    let offset_basis = 0xcbf2_9ce4_8422_2325;
+    let hash = TERRAIN_CHUNKS
+        .into_iter()
+        .chain([floor, sky])
+        .fold(offset_basis, |hash, chunk| {
+            fingerprint(hash, &generator.generate(chunk))
+        });
+
+    assert_eq!((worldgen::RULES_REVISION, hash), (1, 0x2db2_82ec_ade3_9fe9));
+}
+
 #[test]
 fn the_same_seed_and_chunk_give_identical_cells_and_another_seed_gives_different_ones() {
     for chunk in TERRAIN_CHUNKS {

@@ -18,11 +18,21 @@ bevy = { version = "0.20.1", features = ["dynamic_linking"] }
 # or picking.
 bevy_egui = { version = "0.43.1", default-features = false, features = ["render", "default_fonts"] }
 binary-greedy-meshing = "0.6.4"
+# World saves (`src/saves/`): the checksum and compression of a save's body. Bevy's PNG support
+# depends on both already.
+crc32fast = "1.5.5"
 # Channels to and from the simulation thread; see `src/sim_bridge.rs` for why not `std::sync::mpsc`.
 crossbeam-channel = "0.5.17"
+flate2 = "1.1.11"
 ron = "0.12.3"
+# The header of a World save, written as RON.
+serde = { version = "1.0.229", features = ["derive"] }
 sim = { path = "crates/sim" }
 worldgen = { path = "crates/worldgen" }
+
+# Where Windows keeps Local App Data, for World saves and settings (`src/user_dirs.rs`).
+[target.'cfg(windows)'.dependencies]
+known-folders = "1.4.2"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

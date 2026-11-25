@@ -19,6 +19,15 @@ use sim::{CHUNK_SIZE, Cell, CellPos, ChunkPos, ChunkSource, ElementId, ElementTa
 use layout::{ATMOSPHERE_TEMPERATURE_K, Column, FLOOR_TOP_Y, Pocket, Terrain, ground_temperature};
 use transitions::Transitions;
 
+/// The revision of the generation rules: which Cells a seed and a table of Elements generate.
+///
+/// A World save stores only the Chunks that differ from generated terrain and regenerates the
+/// rest from its World Seed (ADR 0005), so a save can be loaded only under the rules it was made
+/// with. Bump this whenever the same seed and Elements would generate different Cells; the test
+/// `the_generated_terrain_is_pinned_to_the_rules_revision` fails until you do. Changes that
+/// generate the same Cells, such as speeding the generator up, keep saves compatible.
+pub const RULES_REVISION: u32 = 1;
+
 /// The Elements the layout uses, by name.
 const OXYGEN: &str = "Oxygen";
 const DIRT: &str = "Dirt";

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Identifies an [`Element`] within the [`ElementTable`] that issued it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,7 +27,7 @@ impl ElementId {
 }
 
 /// Whether an Element is a solid, a liquid, a gas or vacuum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Phase {
     Solid,
     Liquid,
@@ -50,7 +50,7 @@ impl Phase {
 }
 
 /// A Phase Transition threshold: crossing `temperature_k` turns an Element into `into`.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Transition {
     pub temperature_k: f32,
@@ -113,7 +113,7 @@ impl fmt::Display for Side {
 }
 
 /// A kind of matter with fixed physical properties and exactly one Phase.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Element {
     pub name: String,
@@ -132,10 +132,10 @@ pub struct Element {
     #[serde(default)]
     pub tint: f32,
     /// Below `low.temperature_k` this Element becomes `low.into`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low: Option<Transition>,
     /// Above `high.temperature_k` this Element becomes `high.into`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub high: Option<Transition>,
 }
 
@@ -380,8 +380,16 @@ struct ElementsFile {
     elements: Vec<Element>,
 }
 
+/// The layout of `assets/elements.ron`, for writing one.
+#[derive(Serialize)]
+struct ElementsFileRef<'a> {
+    elements: &'a [Element],
+}
+
 /// Every Element the simulation knows about. Vacuum is always present.
-#[derive(Clone, Debug)]
+///
+/// Two tables are equal when they list equal Elements in the same order.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ElementTable {
     elements: Vec<Element>,
 }
@@ -409,6 +417,18 @@ impl ElementTable {
         }
         table.validate()?;
         Ok(table)
+    }
+
+    /// Writes the table as an Elements file, which [`from_ron`](Self::from_ron) reads back as an
+    /// equal table, provided the table is valid. Every number is written exactly.
+    pub fn to_ron(&self) -> String {
+        let file = ElementsFileRef {
+            elements: &self.elements[1..],
+        };
+        // Writing fails only for values RON can't represent, such as maps with non-string keys,
+        // which an Element doesn't hold.
+        ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+            .expect("an Element table can be written as RON")
     }
 
     pub fn add(&mut self, element: Element) -> ElementId {
@@ -586,6 +606,12 @@ impl ElementTable {
             return &SEALED_EDGE;
         }
         &self.elements[usize::from(id.0)]
+    }
+
+    /// The id of the Element at `index`, as [`ElementId::index`] numbers it, if the table holds
+    /// one there. Reads Cells stored by their Element's index back.
+    pub fn id_at(&self, index: u16) -> Option<ElementId> {
+        (usize::from(index) < self.elements.len()).then_some(ElementId(index))
     }
 
     /// The id of the Element called `name`, if there is one.

@@ -85,7 +85,7 @@ Where they are:
 
 ### Deferred
 
-- **Decoding Cells.** `ElementId` has no public constructor, so a save layer can't yet rebuild a checkpoint's Cells from stored indices. Step 17 needs one, such as `ElementId::from_index`, or a lookup through the table. `Simulation::restore` already rejects unknown indices.
-- **Serialising the rules.** `ElementTable`, `Element` and `SimSettings` deserialise but don't serialise, so step 17 needs `Serialize` or its own encoding to store development rules.
+- **Decoding Cells.** `ElementId` has no public constructor, so a save layer can't yet rebuild a checkpoint's Cells from stored indices. Step 17 needs one, such as `ElementId::from_index`, or a lookup through the table. `Simulation::restore` already rejects unknown indices. *Resolved in step 17: `ElementTable::id_at`.*
+- **Serialising the rules.** `ElementTable`, `Element` and `SimSettings` deserialise but don't serialise, so step 17 needs `Serialize` or its own encoding to store development rules. *Resolved in step 17: `Serialize` and `ElementTable::to_ron`.*
 
 The next step encodes and commits saves to disk.

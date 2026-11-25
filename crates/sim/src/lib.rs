@@ -19,6 +19,16 @@ mod settled;
 mod simulation;
 mod transfer;
 
+/// The revision of the simulation's rules, as far as a World save depends on them: what a
+/// [`Checkpoint`] means, and the units and invariants of the Cells it holds. A save made under
+/// another revision is refused rather than misread (`docs/plans/17-world-save-storage.md`).
+///
+/// Bump this when a checkpoint captured before a change would be restored wrongly after it: say,
+/// Mass changes units, a Chunk changes size, or a field of [`Checkpoint`] changes meaning. The
+/// Element table and settings a World runs with are saved alongside it, and a save checks them
+/// separately.
+pub const RULES_REVISION: u32 = 1;
+
 pub use cell::{Cell, CellPos};
 pub use checkpoint::{Checkpoint, CheckpointError, ChunkCheckpoint, ChunkContents};
 pub use chunk::{CHUNK_SIZE, ChunkPos};
