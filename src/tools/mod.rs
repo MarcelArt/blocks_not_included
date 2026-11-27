@@ -2,15 +2,17 @@
 //! design.
 //!
 //! Controls: 1–4 choose Dig, Place, Heat brush or Spawn fluid, and the palette in the top-left
-//! corner sets what they put down and how the brush heats. While the cursor is captured:
+//! corner sets what they put down and how the brush heats. While input is gameplay input
+//! (`crate::input_policy`), with the cursor captured:
 //!
 //! - Dig: left click turns the Cell in view into Vacuum.
 //! - Place: right click puts down the palette's Cell against the face in view.
 //! - Heat brush: holding the left button heats, or cools, the Cells around the one in view.
 //! - Spawn fluid: right click puts down the palette's gas or liquid against the face in view.
 //!
-//! Esc frees the cursor to use the palette, and a click on the world captures it again. That
-//! click only captures; it doesn't use a tool.
+//! Holding Alt frees the cursor to use the palette. A click made while it is free never uses a
+//! tool, even once Alt is released with the button still down. While the World is paused, the
+//! tools do nothing.
 //!
 //! Every Edit is logged, and the Cell it changed is logged as it changes over the next Ticks.
 
@@ -20,13 +22,14 @@ mod target;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::EguiPrimaryContextPass;
 use bevy_egui::input::{EguiWantsInput, egui_wants_any_keyboard_input};
 use sim::{Cell, CellPos, Edit, ElementId, Phase};
 
+use crate::input_policy::{InputPolicy, gameplay_input};
 use crate::player::raycast::{Hit, REACH, raycast};
 use crate::player::{AwaitingSpawn, Player, PlayerSystems};
+use crate::session::{Play, Session, SessionSystems};
 use crate::sim_bridge::{Elements, SimBridge, SimCommand, SimReport};
 use crate::world::WorldView;
 use brush::{BrushStroke, brush_cells};
@@ -39,34 +42,43 @@ const WATCH_TICKS: u64 = 25;
 /// The colour the Cell a tool would change is outlined in.
 const OUTLINE_COLOR: Color = Color::WHITE;
 
-/// The god tools and their palette. Needs the sim bridge and the player, and `EguiPlugin`.
+/// The god tools and their palette, while a World is open. Needs the session, the input policy,
+/// the sim bridge and the player, and `EguiPlugin`.
 pub struct GodToolsPlugin;
 
 impl Plugin for GodToolsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Aim>()
             .init_resource::<WatchedCell>()
-            .add_systems(Startup, set_up_palette)
-            // The tools act before the player's systems, on the cursor and the Cell in view as
-            // they were at the end of the last frame: what the player saw when they clicked. A
-            // click on a frame that starts with the cursor free never uses a tool, even if it
-            // captures the cursor.
+            .add_systems(
+                OnEnter(Session::Open),
+                set_up_tools.in_set(SessionSystems::Build),
+            )
+            // The tools act before the player's systems, on the Cell in view as it was at the end
+            // of the last frame: what the player saw when they clicked.
             .add_systems(
                 Update,
                 (
-                    choose_tool.run_if(not(egui_wants_any_keyboard_input)),
+                    choose_tool
+                        .run_if(gameplay_input)
+                        .run_if(not(egui_wants_any_keyboard_input)),
                     use_tool,
                 )
                     .chain()
-                    .before(PlayerSystems),
+                    .before(PlayerSystems)
+                    .run_if(in_state(Play::Running)),
             )
             .add_systems(
                 Update,
                 (aim, outline_target, log_watched_cell)
                     .chain()
-                    .after(PlayerSystems),
+                    .after(PlayerSystems)
+                    .run_if(in_state(Session::Open)),
             )
-            .add_systems(EguiPrimaryContextPass, palette::draw_palette);
+            .add_systems(
+                EguiPrimaryContextPass,
+                palette::draw_palette.run_if(in_state(Session::Open)),
+            );
     }
 }
 
@@ -125,18 +137,18 @@ impl Cells<'_> {
     }
 }
 
-/// The mouse buttons, as far as the tools may use them: only while the cursor is captured, and
+/// The mouse buttons, as far as the tools may use them: only while input is gameplay input, and
 /// egui doesn't want the pointer.
 #[derive(SystemParam)]
-struct ToolButtons<'w, 's> {
+struct ToolButtons<'w> {
     mouse: Res<'w, ButtonInput<MouseButton>>,
-    cursor: Single<'w, 's, &'static CursorOptions, With<PrimaryWindow>>,
+    policy: Res<'w, InputPolicy>,
     ui: Res<'w, EguiWantsInput>,
 }
 
-impl ToolButtons<'_, '_> {
+impl ToolButtons<'_> {
     fn usable(&self) -> bool {
-        self.cursor.grab_mode != CursorGrabMode::None && !self.ui.wants_any_pointer_input()
+        self.policy.gameplay && !self.ui.wants_any_pointer_input()
     }
 
     fn just_pressed(&self, button: MouseButton) -> bool {
@@ -178,8 +190,17 @@ impl Editor<'_> {
     }
 }
 
-fn set_up_palette(mut commands: Commands, elements: Res<Elements>) {
+/// Starts a World's tools afresh: Dig in hand, the palette set for its Elements, nothing in view
+/// and nothing followed in the log.
+fn set_up_tools(
+    mut commands: Commands,
+    elements: Res<Elements>,
+    mut aim: ResMut<Aim>,
+    mut watched: ResMut<WatchedCell>,
+) {
     commands.insert_resource(Palette::new(&elements));
+    *aim = Aim::default();
+    *watched = WatchedCell::default();
 }
 
 /// Number keys 1–4 choose a tool.
@@ -204,7 +225,8 @@ fn aim(
     aim.set_if_neq(Aim(hit));
 }
 
-/// Uses the tool in hand, as the mouse buttons say.
+/// Uses the tool in hand, as the mouse buttons say. A heat brush stroke ends as soon as the
+/// button is up, or the tools can't use it, before it heats any more.
 fn use_tool(
     buttons: ToolButtons,
     time: Res<Time>,
@@ -214,6 +236,9 @@ fn use_tool(
     mut editor: Editor,
     mut stroke: Local<BrushStroke>,
 ) {
+    if palette.tool != Tool::HeatBrush || !buttons.pressed(MouseButton::Left) {
+        stroke.end();
+    }
     match palette.tool {
         Tool::Dig => {
             if buttons.just_pressed(MouseButton::Left)
@@ -269,9 +294,6 @@ fn use_tool(
                 editor.watch(centre, cells.get(hit.cell));
             }
         }
-    }
-    if palette.tool != Tool::HeatBrush || !buttons.pressed(MouseButton::Left) {
-        stroke.end();
     }
 }
 

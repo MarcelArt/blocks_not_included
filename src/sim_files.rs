@@ -2,14 +2,20 @@
 //! assets so that editing one while the game runs changes the simulation. Development builds
 //! watch `assets/` for changes: this crate's default `dev` feature turns on Bevy's `file_watcher`.
 //!
-//! The simulation starts from the files as [`SimBridgePlugin::sandbox`] reads them. Every later
-//! version of a file goes to the simulation as a [`SimCommand::ReplaceElements`] or
-//! [`SimCommand::ReplaceSettings`]. A version that fails to parse or validate, or that the
-//! simulation rejects, is reported in [`SimFileStatus`] and the log, and the simulation keeps the
-//! version before. Once the simulation takes up an Element table, the sim bridge puts it in
+//! The assets load, and are watched, for as long as the game runs. A new World's simulation starts
+//! from the files as [`SimStart::sandbox`] reads them, and a saved World's from the rules it was
+//! saved with. Either way, only a version of a file that loads while the World is open counts:
+//! it goes to that World's simulation as a [`SimCommand::ReplaceElements`] or
+//! [`SimCommand::ReplaceSettings`]. Versions that load while no World is open, or as one opens,
+//! are dropped, so a saved World keeps its own rules until a file changes during play. While the
+//! World is paused, the latest version of each file is held back, and sent once it runs again.
+//!
+//! A version that fails to parse or validate, or that the simulation rejects, is reported in
+//! [`SimFileStatus`] and the log, and the simulation keeps the version before. Once the
+//! simulation takes up an Element table, the sim bridge puts it in
 //! [`Elements`](crate::sim_bridge::Elements), and every Chunk is remeshed in its colours.
 //!
-//! [`SimBridgePlugin::sandbox`]: crate::sim_bridge::SimBridgePlugin::sandbox
+//! [`SimStart::sandbox`]: crate::sim_bridge::SimStart::sandbox
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -21,10 +27,12 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use sim::{ElementError, ElementTable, SettingsError, SimSettings};
 
+use crate::session::{Play, Session, SessionSystems};
 use crate::sim_bridge::{ReplaceOutcome, SimBridge, SimCommand, SimReport};
 
-/// Loads the simulation's data files as assets, sends the simulation every new version, and
-/// reports what became of it in [`SimFileStatus`]. Needs the sim bridge and Bevy's `AssetPlugin`.
+/// Loads the simulation's data files as assets, sends the open World's simulation every new
+/// version, and reports what became of it in [`SimFileStatus`]. Needs the session, the sim bridge
+/// and Bevy's `AssetPlugin`.
 pub struct SimFilesPlugin;
 
 impl Plugin for SimFilesPlugin {
@@ -33,6 +41,12 @@ impl Plugin for SimFilesPlugin {
         register::<SettingsFile>(app);
         app.init_resource::<SimFileStatus>()
             .add_systems(Startup, (load::<ElementsFile>, load::<SettingsFile>))
+            // Each World starts as its files did.
+            .add_systems(
+                OnEnter(Session::Open),
+                (|mut status: ResMut<SimFileStatus>| *status = SimFileStatus::default())
+                    .in_set(SessionSystems::Build),
+            )
             .add_systems(
                 Update,
                 (
@@ -40,7 +54,7 @@ impl Plugin for SimFilesPlugin {
                     send_new_versions::<SettingsFile>,
                     record_failures::<ElementsFile>,
                     record_failures::<SettingsFile>,
-                    record_outcomes,
+                    record_outcomes.run_if(in_state(Session::Open)),
                 ),
             );
     }
@@ -156,7 +170,8 @@ impl SimFileStatus {
 /// What became of the latest version of one simulation file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum FileStatus {
-    /// Unchanged since the simulation started from it.
+    /// No version has loaded since the World opened: the simulation runs with the rules it
+    /// started with.
     #[default]
     AsStarted,
     /// The simulation took up the latest version once it had run `tick` Ticks.
@@ -205,21 +220,36 @@ fn load<F: SimFile>(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(Loaded(server.load::<F>(F::PATH)));
 }
 
-/// Sends the simulation every new version of `F`. The first version loaded is the one it
-/// started from, so only reloads count.
+/// Sends the open World's simulation every version of `F` reloaded while it is open: at once
+/// while the World runs, and the latest one once it runs again while it is paused. The first
+/// version loaded isn't a reload, and versions from before the World opened don't count.
 fn send_new_versions<F: SimFile>(
     mut events: MessageReader<AssetEvent<F>>,
     loaded: Res<Loaded<F>>,
     files: Res<Assets<F>>,
-    bridge: Res<SimBridge>,
+    bridge: Option<Res<SimBridge>>,
+    play: Option<Res<State<Play>>>,
+    mut held_back: Local<Option<F>>,
 ) {
+    // Assets write their events late in the frame, so those read as a World opens are from
+    // before it did.
+    let Some(bridge) = bridge.filter(|bridge| !bridge.is_added()) else {
+        events.clear();
+        *held_back = None;
+        return;
+    };
     for event in events.read() {
         if let AssetEvent::Modified { id } = event
             && *id == loaded.0.id()
             && let Some(file) = files.get(*id)
         {
-            bridge.send(file.replace_command());
+            *held_back = Some(file.clone());
         }
+    }
+    if play.is_some_and(|play| *play.get() == Play::Running)
+        && let Some(file) = held_back.take()
+    {
+        bridge.send(file.replace_command());
     }
 }
 

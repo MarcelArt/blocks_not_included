@@ -6,10 +6,22 @@
 //! a replaced Element table or settings with a [`ReplaceOutcome`], and a request for a capture
 //! with a [`SimCapture`], on a channel of its own.
 //!
-//! # Starting
+//! # Starting and stopping
 //!
-//! The simulation starts from a fresh world ([`SimBridgePlugin::new`],
-//! [`SimBridgePlugin::generated`]) or from a capture ([`SimBridgePlugin::restore`]).
+//! The simulation thread runs only while a World is open ([`Session::Open`]). A [`SimStart`] says
+//! what it starts from: a fresh world ([`SimStart::fresh`], [`SimStart::generated`]) or a capture
+//! ([`SimStart::restored`]). Opening a World starts the thread and inserts the World's resources:
+//! [`SimBridge`], [`Elements`], [`SimFocus`], [`WorldView`], [`SimReport`] and [`TickRate`].
+//! Closing it removes them all and shuts the thread down, so nothing that thread sends reaches
+//! the next World, which starts from nothing.
+//!
+//! # Freezing
+//!
+//! The game's pause freezes the simulation ([`SimBridge::freeze`]): no Tick runs, and a Step is
+//! ignored, until it is unfrozen. Freezing leaves the clock (Pause, Resume and Step, which the
+//! debug panel drives) as it was, so unfreezing restores it. The thread acknowledges a freeze
+//! between two Ticks, once it has handled every command sent before and sent the game everything
+//! they changed.
 //!
 //! # The simulation thread
 //!
@@ -25,7 +37,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -42,6 +54,7 @@ use sim::{
 };
 use worldgen::{Generator, MissingElements};
 
+use crate::session::{Play, Session, SessionSystems};
 use crate::sim_files::{ElementsFile, SettingsFile, SimFile};
 use crate::world::{WorldView, locate};
 
@@ -93,7 +106,15 @@ pub enum SimCommand {
     /// Captures the simulation, once every command sent before has been handled, and sends the
     /// [`SimCapture`] on this channel. [`SimBridge::capture`] sends this for you.
     Capture(Sender<SimCapture>),
-    /// Ends the simulation thread. [`SimBridge`] sends this itself when the app exits.
+    /// Freezes the simulation for the game's pause: no Tick runs, and Step is ignored, until
+    /// [`SimCommand::Unfreeze`]. The clock stays as it is, so unfreezing restores it. Once every
+    /// command sent before has been handled, and the game sent everything they changed, the
+    /// thread answers with this number. [`SimBridge::freeze`] sends this for you.
+    Freeze(u64),
+    /// Ends a freeze. If the clock runs, the next Tick follows one [`TICK_INTERVAL`] later.
+    Unfreeze,
+    /// Ends the simulation thread. [`SimBridge`] sends this itself when the World closes or the
+    /// app exits.
     Shutdown,
 }
 
@@ -105,7 +126,8 @@ pub struct RenderDistance {
     pub vertical: i32,
 }
 
-/// How the simulation is doing, as of its latest Tick. Until the first Tick, it is all zeroes.
+/// How the simulation is doing, as of its latest Tick. Until the simulation first reports, as it
+/// starts, it holds only the Tick count it starts from.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 pub struct SimReport {
     /// How many Ticks have run: the same as `stats.tick_count`.
@@ -131,9 +153,11 @@ pub enum ReplaceOutcome {
 pub struct TickRate(pub f64);
 
 /// The focus (`CONTEXT.md`): the Cell the Active Region is centred on. The bridge sends the
-/// simulation every change, and keeps render distance around the focus's Chunk.
+/// simulation every change while the World runs, and keeps render distance around the focus's
+/// Chunk.
 ///
-/// It starts just above the surface at the origin, where it stays until the player moves it.
+/// A fresh world's starts just above the surface at the origin, and a restored one's where it
+/// was captured. It stays there until the player moves it.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimFocus(pub CellPos);
 
@@ -161,7 +185,7 @@ impl Generation {
 
 /// The simulation captured between two Ticks, as [`SimBridge::capture`] answers: its
 /// [`Checkpoint`], with the rules it ran under and, for a generated world, what its terrain comes
-/// from. [`SimBridgePlugin::restore`] starts the simulation from it again.
+/// from. [`SimStart::restored`] starts the simulation from it again.
 ///
 /// It is owned: nothing the simulation does afterwards changes it, so it can be encoded and
 /// written anywhere, at any pace. [`WorldStore`](crate::saves::WorldStore) saves it to disk.
@@ -179,17 +203,18 @@ pub struct SimCapture {
     pub generation: Option<Generation>,
 }
 
-/// Runs the simulation on a thread of its own, steers it with [`SimFocus`] and render distance,
-/// and keeps [`WorldView`] and [`SimReport`] up to date.
-pub struct SimBridgePlugin {
-    /// What the simulation starts from, taken when the plugin is built.
-    setup: Mutex<Option<Setup>>,
-}
-
-struct Setup {
+/// What a World's simulation starts from, and where its focus starts.
+///
+/// It is built before the World opens, on any thread: finding a fresh world's surface and
+/// restoring a capture both take a while. A capture that fails its checks is rejected here,
+/// before anything starts.
+pub struct SimStart {
     /// The Element table the simulation starts with, for [`Elements`].
     elements: ElementTable,
     generation: Option<Generation>,
+    focus: CellPos,
+    /// The Ticks the simulation has run before it starts.
+    tick_count: u64,
     start: Start,
 }
 
@@ -205,22 +230,19 @@ enum Start {
     Restored(Box<Simulation>),
 }
 
-impl SimBridgePlugin {
-    /// A simulation of `elements` under `settings`, whose Chunks come from `source`.
-    pub fn new(
+impl SimStart {
+    /// A simulation of `elements` under `settings`, whose Chunks come from `source`. The focus
+    /// starts just above the surface at the origin.
+    ///
+    /// # Panics
+    ///
+    /// If `settings` are invalid.
+    pub fn fresh(
         elements: ElementTable,
         settings: SimSettings,
         source: Box<dyn ChunkSource>,
     ) -> Self {
-        Self::starting(Setup {
-            elements: elements.clone(),
-            generation: None,
-            start: Start::Fresh {
-                elements,
-                settings,
-                source,
-            },
-        })
+        Self::starting_fresh(elements, settings, source, None)
     }
 
     /// A simulation of `elements` under `settings`, in a world generated from `seed` and
@@ -228,6 +250,10 @@ impl SimBridgePlugin {
     /// every [`SimCapture`] holds them in its [`Generation`].
     ///
     /// Fails if `elements` lacks one the world is made of.
+    ///
+    /// # Panics
+    ///
+    /// If `settings` are invalid.
     pub fn generated(
         seed: u64,
         elements: ElementTable,
@@ -235,15 +261,34 @@ impl SimBridgePlugin {
     ) -> Result<Self, MissingElements> {
         let generation = Generation { seed, elements };
         let generator = generation.generator()?;
-        Ok(Self::starting(Setup {
-            elements: generation.elements.clone(),
+        Ok(Self::starting_fresh(
+            generation.elements.clone(),
+            settings,
+            Box::new(generator),
+            Some(generation),
+        ))
+    }
+
+    fn starting_fresh(
+        elements: ElementTable,
+        settings: SimSettings,
+        source: Box<dyn ChunkSource>,
+        generation: Option<Generation>,
+    ) -> Self {
+        if let Err(err) = settings.validate() {
+            panic!("invalid simulation settings: {err}");
+        }
+        Self {
+            focus: just_above_surface(&*source, &elements, 0, 0),
+            tick_count: 0,
+            generation,
             start: Start::Fresh {
-                elements: generation.elements.clone(),
+                elements: elements.clone(),
                 settings,
-                source: Box::new(generator),
+                source,
             },
-            generation: Some(generation),
-        }))
+            elements,
+        }
     }
 
     /// The simulation `capture` holds, restored with its own rules, and with `source` for the
@@ -251,8 +296,8 @@ impl SimBridgePlugin {
     /// [`Generation`] makes. The focus starts where the capture's was.
     ///
     /// The capture is checked against its rules and `source` first, as [`Simulation::restore`]
-    /// does, and a capture that fails is rejected before any simulation starts.
-    pub fn restore(
+    /// does, and a capture that fails is rejected.
+    pub fn restored(
         capture: SimCapture,
         source: Box<dyn ChunkSource>,
     ) -> Result<Self, CheckpointError> {
@@ -262,16 +307,19 @@ impl SimBridgePlugin {
             settings,
             generation,
         } = capture;
+        let tick_count = checkpoint.tick_count;
         let sim = Simulation::restore(elements.clone(), settings, source, checkpoint)?;
-        Ok(Self::starting(Setup {
+        Ok(Self {
             elements,
             generation,
+            focus: sim.focus(),
+            tick_count,
             start: Start::Restored(Box::new(sim)),
-        }))
+        })
     }
 
     /// The Sim Sandbox: Elements from `assets/elements.ron`, settings from
-    /// `assets/sim_settings.ron`, and a world generated from [`WORLD_SEED`].
+    /// `assets/sim_settings.ron`, as the files are now, and a world generated from [`WORLD_SEED`].
     ///
     /// # Panics
     ///
@@ -283,10 +331,9 @@ impl SimBridgePlugin {
         Self::generated(WORLD_SEED, elements, settings).unwrap_or_else(|err| panic!("{err}"))
     }
 
-    fn starting(setup: Setup) -> Self {
-        Self {
-            setup: Mutex::new(Some(setup)),
-        }
+    /// Where the focus starts.
+    pub fn focus(&self) -> CellPos {
+        self.focus
     }
 }
 
@@ -302,53 +349,106 @@ fn read_sim_file<F: SimFile>(assets: &Path) -> F {
     F::parse(&bytes).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
 }
 
+/// The [`SimStart`] of the World about to open. `crate::session::OpenWorld` inserts it, and
+/// opening the World takes it. In a `Mutex` because a [`ChunkSource`] is `Send` but not `Sync`.
+#[derive(Resource)]
+pub(crate) struct PendingSim(pub(crate) Mutex<SimStart>);
+
+/// Runs the simulation on a thread of its own while a World is open, steers it with [`SimFocus`]
+/// and render distance while the World runs, and keeps [`WorldView`] and [`SimReport`] up to
+/// date. Needs `crate::session::SessionPlugin`.
+pub struct SimBridgePlugin;
+
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
-        let Setup {
-            elements,
-            generation,
-            start,
-        } = self
-            .setup
-            .lock()
-            .ok()
-            .and_then(|mut setup| setup.take())
-            .expect("SimBridgePlugin is built only once");
-        let focus = match &start {
-            Start::Fresh {
-                elements,
-                settings,
-                source,
-            } => {
-                if let Err(err) = settings.validate() {
-                    panic!("invalid simulation settings: {err}");
-                }
-                just_above_surface(&**source, elements, 0, 0)
-            }
-            Start::Restored(sim) => sim.focus(),
-        };
-        app.insert_resource(Elements(elements))
-            .insert_resource(SimFocus(focus))
-            .insert_resource(SimBridge::spawn(start, generation))
-            .init_resource::<WorldView>()
-            .init_resource::<SimReport>()
-            .init_resource::<TickRate>()
-            .add_message::<ReplaceOutcome>()
-            .add_systems(First, receive_updates)
-            .add_systems(Update, (measure_tick_rate, log_progress).chain())
-            .add_systems(PostUpdate, follow_focus)
+        let open = in_state(Session::Open);
+        app.add_message::<ReplaceOutcome>()
+            .add_systems(
+                OnEnter(Session::Open),
+                start_simulation.in_set(SessionSystems::Start),
+            )
+            .add_systems(OnExit(Session::Open), stop_simulation)
+            .add_systems(First, receive_updates.run_if(open.clone()))
+            .add_systems(
+                Update,
+                (measure_tick_rate, log_progress).chain().run_if(open),
+            )
+            // While paused, the focus stays where it is: the simulation hears of any change once
+            // the World runs again.
+            .add_systems(PostUpdate, follow_focus.run_if(in_state(Play::Running)))
             .add_systems(Last, shut_down_on_exit);
     }
 }
 
-/// The game's end of the simulation thread. When the app exits, or this is dropped, it shuts the
-/// thread down and waits for it to end.
+/// What the bridge's own systems keep for the World open.
+#[derive(Resource, Default)]
+struct BridgeState {
+    /// The Chunk render distance was last moved around.
+    view_centre: Option<ChunkPos>,
+    /// When [`TickRate`] was last measured, and the Tick count then.
+    measured: Option<(Duration, u64)>,
+}
+
+/// Starts the simulation thread for the World opening, from its [`PendingSim`], and inserts the
+/// World's resources.
+fn start_simulation(world: &mut World) {
+    let PendingSim(start) = world
+        .remove_resource::<PendingSim>()
+        .expect("a World opens through `OpenWorld`, which says what it starts from");
+    let SimStart {
+        elements,
+        generation,
+        focus,
+        tick_count,
+        start,
+    } = start.into_inner().unwrap_or_else(PoisonError::into_inner);
+    world.insert_resource(Elements(elements));
+    world.insert_resource(SimFocus(focus));
+    world.insert_resource(SimReport {
+        tick: tick_count,
+        ..default()
+    });
+    world.insert_resource(TickRate::default());
+    world.insert_resource(WorldView::default());
+    world.insert_resource(BridgeState::default());
+    world.insert_resource(SimBridge::spawn(start, generation));
+}
+
+/// Shuts the simulation thread down as the World closes, and removes the World's resources.
+fn stop_simulation(world: &mut World) {
+    // Dropping the bridge shuts the thread down and waits for it to end.
+    world.remove_resource::<SimBridge>();
+    world.remove_resource::<Elements>();
+    world.remove_resource::<SimFocus>();
+    world.remove_resource::<SimReport>();
+    world.remove_resource::<TickRate>();
+    world.remove_resource::<WorldView>();
+    world.remove_resource::<BridgeState>();
+}
+
+/// The game's end of the simulation thread, while a World is open. When the World closes, the app
+/// exits, or this is dropped, it shuts the thread down and waits for it to end.
 #[derive(Resource)]
 pub struct SimBridge {
     commands: Sender<SimCommand>,
     updates: Receiver<SimUpdate>,
     /// `None` once the thread has ended.
     thread: Option<JoinHandle<()>>,
+    freeze: Freeze,
+    /// The number the next freeze asks the thread to answer with.
+    next_freeze: u64,
+}
+
+/// Whether the game has frozen the simulation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Freeze {
+    Unfrozen,
+    /// Asked to freeze, with this number, and not yet answered.
+    Requested(u64),
+    /// Frozen once it had run this many Ticks.
+    Frozen {
+        tick: u64,
+    },
 }
 
 impl SimBridge {
@@ -379,6 +479,8 @@ impl SimBridge {
             commands,
             updates,
             thread: Some(thread),
+            freeze: Freeze::Unfrozen,
+            next_freeze: 0,
         }
     }
 
@@ -397,6 +499,42 @@ impl SimBridge {
         let (reply, answer) = crossbeam_channel::bounded(1);
         self.send(SimCommand::Capture(reply));
         answer
+    }
+
+    /// Freezes the simulation, unless it is frozen or asked to freeze already: no Tick runs, and
+    /// Step is ignored, until [`unfreeze`](Self::unfreeze). The clock stays as it is.
+    ///
+    /// The thread answers once it has handled every command sent before, between two Ticks, and
+    /// [`frozen_at`](Self::frozen_at) says so once the answer reaches the game. Everything those
+    /// commands changed has reached [`WorldView`] by then.
+    pub fn freeze(&mut self) {
+        if self.freeze == Freeze::Unfrozen {
+            let request = self.next_freeze;
+            self.next_freeze += 1;
+            self.send(SimCommand::Freeze(request));
+            self.freeze = Freeze::Requested(request);
+        }
+    }
+
+    /// Ends a freeze, answered or not. Does nothing unless frozen or asked to freeze.
+    pub fn unfreeze(&mut self) {
+        if self.freeze != Freeze::Unfrozen {
+            self.send(SimCommand::Unfreeze);
+            self.freeze = Freeze::Unfrozen;
+        }
+    }
+
+    /// Whether the simulation is frozen or asked to freeze.
+    pub fn is_freezing(&self) -> bool {
+        self.freeze != Freeze::Unfrozen
+    }
+
+    /// The Tick count the simulation froze at, once it has answered the latest freeze.
+    pub fn frozen_at(&self) -> Option<u64> {
+        match self.freeze {
+            Freeze::Frozen { tick } => Some(tick),
+            Freeze::Unfrozen | Freeze::Requested(_) => None,
+        }
     }
 
     /// Shuts the simulation thread down, and waits for it to end.
@@ -451,6 +589,12 @@ fn receive_updates(
             Ok(SimUpdate::SettingsReplaced(answer)) => {
                 outcomes.write(ReplaceOutcome::Settings(answer));
             }
+            Ok(SimUpdate::Frozen { request, tick }) => {
+                // An answer to a freeze ended since is stale.
+                if bridge.freeze == Freeze::Requested(request) {
+                    bridge.freeze = Freeze::Frozen { tick };
+                }
+            }
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 // The thread has ended unasked, which only a panic or a `SimCommand::Shutdown`
@@ -468,14 +612,14 @@ fn receive_updates(
 
 /// Sends the simulation every change of focus, and moves render distance whenever the focus
 /// enters another Chunk.
-fn follow_focus(focus: Res<SimFocus>, bridge: Res<SimBridge>, mut centre: Local<Option<ChunkPos>>) {
+fn follow_focus(focus: Res<SimFocus>, bridge: Res<SimBridge>, mut state: ResMut<BridgeState>) {
     if !focus.is_changed() {
         return;
     }
     bridge.send(SimCommand::Focus(focus.0));
     let chunk = ChunkPos::of(focus.0);
-    if *centre != Some(chunk) {
-        *centre = Some(chunk);
+    if state.view_centre != Some(chunk) {
+        state.view_centre = Some(chunk);
         bridge.send(SimCommand::LoadAround {
             center: chunk,
             radius: RENDER_DISTANCE,
@@ -488,13 +632,13 @@ fn measure_tick_rate(
     time: Res<Time<Real>>,
     report: Res<SimReport>,
     mut rate: ResMut<TickRate>,
-    mut measured: Local<Option<(Duration, u64)>>,
+    mut state: ResMut<BridgeState>,
 ) {
     let now = time.elapsed();
-    let (measured_at, measured_tick) = *measured.get_or_insert((now, report.tick));
+    let (measured_at, measured_tick) = *state.measured.get_or_insert((now, report.tick));
     let elapsed = now - measured_at;
     if elapsed >= TICK_RATE_INTERVAL {
-        *measured = Some((now, report.tick));
+        state.measured = Some((now, report.tick));
         rate.0 = report.tick.saturating_sub(measured_tick) as f64 / elapsed.as_secs_f64();
     }
 }
@@ -529,11 +673,13 @@ fn log_progress(
     );
 }
 
-/// Shuts the simulation thread down when the app exits.
-fn shut_down_on_exit(mut exits: MessageReader<AppExit>, mut bridge: ResMut<SimBridge>) {
+/// Shuts the simulation thread down when the app exits with a World open.
+fn shut_down_on_exit(mut exits: MessageReader<AppExit>, bridge: Option<ResMut<SimBridge>>) {
     if !exits.is_empty() {
         exits.clear();
-        bridge.shut_down();
+        if let Some(mut bridge) = bridge {
+            bridge.shut_down();
+        }
     }
 }
 
@@ -574,6 +720,11 @@ enum SimUpdate {
     ElementsReplaced(Result<ElementTable, ElementError>),
     /// The answer to a [`SimCommand::ReplaceSettings`].
     SettingsReplaced(Result<(), SettingsError>),
+    /// The answer to a [`SimCommand::Freeze`]: its number, and the Ticks run.
+    Frozen {
+        request: u64,
+        tick: u64,
+    },
 }
 
 /// All the Cells of a Chunk within render distance that has loaded or changed.
@@ -589,7 +740,12 @@ struct SimThread {
     generation: Option<Generation>,
     commands: Receiver<SimCommand>,
     updates: Sender<SimUpdate>,
+    /// Whether the clock is stopped.
     paused: bool,
+    /// Whether the game has paused, which holds off Ticks whatever the clock says.
+    frozen: bool,
+    /// The Ticks run so far.
+    tick_count: u64,
     /// When the next Tick is due.
     next_tick: Instant,
     /// The Chunks within render distance, once the game has said where that is. Until then,
@@ -624,6 +780,8 @@ impl SimThread {
             commands,
             updates,
             paused: false,
+            frozen: false,
+            tick_count: 0,
             next_tick: Instant::now() + TICK_INTERVAL,
             view: None,
             shown: HashSet::new(),
@@ -633,14 +791,15 @@ impl SimThread {
     }
 
     fn run(mut self) {
-        // The Active Region, loaded when the simulation was made.
+        // The Active Region, loaded when the simulation was made, and how the simulation starts.
         self.send_active_region();
         self.send_changed_chunks(None);
+        self.report(Duration::ZERO);
         while self.handle_commands().is_continue() {
             // Edits, and Chunks that entered the Active Region as the focus moved.
             self.send_active_region();
             self.send_changed_chunks(None);
-            if !self.paused && Instant::now() >= self.next_tick {
+            if !self.paused && !self.frozen && Instant::now() >= self.next_tick {
                 self.tick();
                 self.next_tick = (self.next_tick + TICK_INTERVAL).max(Instant::now());
             }
@@ -654,7 +813,7 @@ impl SimThread {
     fn handle_commands(&mut self) -> ControlFlow<()> {
         let mut wait = if !self.to_show.is_empty() {
             Wait::No
-        } else if self.paused {
+        } else if self.paused || self.frozen {
             Wait::Indefinitely
         } else {
             Wait::Until(self.next_tick)
@@ -697,8 +856,23 @@ impl SimThread {
                 self.paused = false;
                 self.next_tick = Instant::now() + TICK_INTERVAL;
             }
-            SimCommand::Step if self.paused => self.tick(),
+            SimCommand::Step if self.paused && !self.frozen => self.tick(),
             SimCommand::Resume | SimCommand::Step => {}
+            SimCommand::Freeze(request) => {
+                self.frozen = true;
+                // Everything the commands before changed reaches the game before the answer.
+                self.send_active_region();
+                self.send_changed_chunks(None);
+                self.send(SimUpdate::Frozen {
+                    request,
+                    tick: self.tick_count,
+                });
+            }
+            SimCommand::Unfreeze if self.frozen => {
+                self.frozen = false;
+                self.next_tick = Instant::now() + TICK_INTERVAL;
+            }
+            SimCommand::Unfreeze => {}
             SimCommand::ReplaceElements(elements) => {
                 let answer = self.sim.replace_elements(elements.clone());
                 self.send(SimUpdate::ElementsReplaced(answer.map(|()| elements)));
@@ -755,7 +929,13 @@ impl SimThread {
         self.sim.tick();
         let tick_duration = started.elapsed();
         self.send_changed_chunks(None);
+        self.report(tick_duration);
+    }
+
+    /// Sends the game how the simulation is doing, after a Tick that took `tick_duration`.
+    fn report(&mut self, tick_duration: Duration) {
         let stats = self.sim.stats();
+        self.tick_count = stats.tick_count;
         self.send(SimUpdate::Report(SimReport {
             tick: stats.tick_count,
             tick_duration,

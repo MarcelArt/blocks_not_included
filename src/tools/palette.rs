@@ -4,10 +4,11 @@
 use std::ops::RangeInclusive;
 
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::{EguiContexts, egui};
 use sim::{Cell, Element, ElementId, ElementTable, Phase};
 
+use crate::input_policy::InputPolicy;
+use crate::session::Play;
 use crate::sim_bridge::Elements;
 
 /// The temperature the palette starts at, in kelvin: 20 °C.
@@ -178,15 +179,17 @@ pub fn mass_limit_grams(element: &Element) -> u32 {
     }
 }
 
-/// Draws the palette in the top-left corner. While the cursor is captured, clicks pass through
-/// it, so the hidden cursor can't press its buttons and egui never wants the pointer.
+/// Draws the palette in the top-left corner. During gameplay, with the cursor captured, clicks
+/// pass through it, so the hidden cursor can't press its buttons and egui never wants the
+/// pointer.
 pub(super) fn draw_palette(
     mut contexts: EguiContexts,
     mut palette: ResMut<Palette>,
     elements: Res<Elements>,
-    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    policy: Res<InputPolicy>,
+    play: Res<State<Play>>,
 ) -> Result {
-    let captured = cursor.grab_mode != CursorGrabMode::None;
+    let captured = policy.gameplay;
     // Only mark the palette changed when a widget changes it.
     let mut edited = palette.clone();
     egui::Window::new("God tools")
@@ -237,9 +240,11 @@ pub(super) fn draw_palette(
             }
             ui.separator();
             ui.weak(if captured {
-                "Esc frees the cursor to use this panel."
+                "Hold Alt to use this panel."
+            } else if *play.get() == Play::Running {
+                "Release Alt to aim again."
             } else {
-                "Click the world to aim again."
+                "Esc resumes the World."
             });
         });
     palette.set_if_neq(edited);

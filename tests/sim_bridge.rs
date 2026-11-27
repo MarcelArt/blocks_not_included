@@ -1,4 +1,5 @@
-//! `SimBridgePlugin` in a headless `App`, with a tiny Element table and a world of Vacuum.
+//! `SimBridgePlugin` in a headless `App`, with a tiny Element table and a world of Vacuum. Each
+//! test opens a World through the session, without a player.
 //!
 //! The simulation runs on a thread of its own, at 5 Ticks per second, so these tests wait in real
 //! time, with generous timeouts.
@@ -10,9 +11,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
+use bevy::state::app::StatesPlugin;
+use blocks_not_included::session::{OpenWorld, SessionPlugin, WorldStart};
 use blocks_not_included::sim_bridge::{
     Elements, ReplaceOutcome, SimBridge, SimBridgePlugin, SimCapture, SimCommand, SimFocus,
-    SimReport,
+    SimReport, SimStart,
 };
 use blocks_not_included::world::WorldView;
 use sim::{
@@ -111,14 +114,23 @@ fn tiny_elements() -> (ElementTable, ElementId) {
     (elements, rock)
 }
 
+/// An app with a World open from `start`, before its first frame.
+fn app_starting(start: SimStart) -> App {
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, StatesPlugin, SessionPlugin, SimBridgePlugin));
+    app.world_mut().commands().queue(OpenWorld(WorldStart {
+        sim: start,
+        player: None,
+    }));
+    app.world_mut().flush();
+    // Startup, during which the World opens.
+    app.update();
+    app
+}
+
 fn app_with(source: Box<dyn ChunkSource>) -> App {
     let (elements, _) = tiny_elements();
-    let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        SimBridgePlugin::new(elements, SimSettings::default(), source),
-    ));
-    app
+    app_starting(SimStart::fresh(elements, SimSettings::default(), source))
 }
 
 fn send(app: &App, command: SimCommand) {
@@ -464,7 +476,7 @@ fn rock_and_gas() -> (ElementTable, ElementId) {
     (elements, gas)
 }
 
-/// An app simulating `elements` in a world of Vacuum, with the clock stopped before any Tick.
+/// `app`, with the clock stopped before any Tick.
 fn paused_app(app: App) -> App {
     // The first Tick is due a whole Tick interval after the thread starts.
     send(&app, SimCommand::Pause);
@@ -481,12 +493,11 @@ fn step(app: &mut App) {
 #[test]
 fn a_restored_simulation_carries_on_through_the_bridge_as_the_captured_one_does() {
     let (elements, gas) = rock_and_gas();
-    let mut played = App::new();
-    played.add_plugins((
-        MinimalPlugins,
-        SimBridgePlugin::new(elements, SimSettings::default(), Box::new(VacuumSource)),
-    ));
-    let mut played = paused_app(played);
+    let mut played = paused_app(app_starting(SimStart::fresh(
+        elements,
+        SimSettings::default(),
+        Box::new(VacuumSource),
+    )));
     // A release of gas, spreading into Vacuum in ways the Tick count breaks ties for.
     let release = CellPos::new(3, 3, 3);
     let gas_cell = Cell {
@@ -507,10 +518,8 @@ fn a_restored_simulation_carries_on_through_the_bridge_as_the_captured_one_does(
     let captured = capture(&played);
     assert_eq!(captured.checkpoint.tick_count, 3);
 
-    let restored = SimBridgePlugin::restore(captured, Box::new(VacuumSource)).expect("restored");
-    let mut resumed = App::new();
-    resumed.add_plugins((MinimalPlugins, restored));
-    let mut resumed = paused_app(resumed);
+    let restored = SimStart::restored(captured, Box::new(VacuumSource)).expect("restored");
+    let mut resumed = paused_app(app_starting(restored));
     step(&mut played);
     step(&mut resumed);
 
@@ -531,17 +540,15 @@ fn a_capture_holds_the_last_accepted_rules_and_the_generators_startup_elements()
     let startup = ElementTable::from_ron(include_str!("../assets/elements.ron"))
         .expect("the shipped Elements are valid");
     let granite = startup.id_of("Granite").unwrap();
-    let plugin = SimBridgePlugin::generated(7, startup.clone(), SimSettings::default())
+    let start = SimStart::generated(7, startup.clone(), SimSettings::default())
         .expect("the shipped Elements are enough");
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, plugin))
-        .init_resource::<Outcomes>()
-        .add_systems(
-            Update,
-            |mut outcomes: MessageReader<ReplaceOutcome>, mut seen: ResMut<Outcomes>| {
-                seen.0.extend(outcomes.read().cloned());
-            },
-        );
+    let mut app = app_starting(start);
+    app.init_resource::<Outcomes>().add_systems(
+        Update,
+        |mut outcomes: MessageReader<ReplaceOutcome>, mut seen: ResMut<Outcomes>| {
+            seen.0.extend(outcomes.read().cloned());
+        },
+    );
     // Granite conducts 100 times better, then a rename is rejected.
     let mut conductive = ElementTable::new();
     let mut renamed = ElementTable::new();
@@ -600,9 +607,8 @@ fn a_capture_holds_the_last_accepted_rules_and_the_generators_startup_elements()
         .unwrap()
         .generator()
         .expect("the startup Elements are enough");
-    let restored = SimBridgePlugin::restore(captured, Box::new(generator)).expect("restored");
-    let mut resumed = App::new();
-    resumed.add_plugins((MinimalPlugins, restored));
+    let restored = SimStart::restored(captured, Box::new(generator)).expect("restored");
+    let resumed = app_starting(restored);
     check(&capture(&resumed));
     assert_eq!(
         resumed
@@ -645,7 +651,7 @@ fn a_malformed_capture_is_rejected_and_no_simulation_starts() {
         dropped: Arc::clone(&dropped),
     };
 
-    let restored = SimBridgePlugin::restore(captured, Box::new(source));
+    let restored = SimStart::restored(captured, Box::new(source));
 
     assert!(
         matches!(restored, Err(CheckpointError::InvalidMass { .. })),
@@ -654,4 +660,69 @@ fn a_malformed_capture_is_rejected_and_no_simulation_starts() {
     );
     // The source went with the rejected checkpoint: no simulation holds it.
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_freeze_is_answered_after_earlier_edits_and_holds_off_ticks_and_steps_until_unfrozen() {
+    let (_, rock) = tiny_elements();
+    let mut app = app_with(Box::new(VacuumSource));
+    update_until(&mut app, "the clock runs", |app| tick(app) >= 1);
+
+    let pos = CellPos::new(3, 5, -7);
+    send(
+        &app,
+        SimCommand::Edit(Edit::Place {
+            pos,
+            cell: rock_cell(rock),
+        }),
+    );
+    app.world_mut().resource_mut::<SimBridge>().freeze();
+    let frozen_at = |app: &App| app.world().resource::<SimBridge>().frozen_at();
+    update_until(&mut app, "the freeze is answered", |app| {
+        frozen_at(app).is_some()
+    });
+
+    // The Edit sent before the freeze has reached the world view by the time the answer does,
+    // which came between two Ticks: the report of the last Tick before it arrived first.
+    assert_eq!(
+        app.world().resource::<WorldView>().cell(pos),
+        Some(rock_cell(rock))
+    );
+    let frozen_tick = tick(&app);
+    assert_eq!(frozen_at(&app), Some(frozen_tick));
+    // Frozen with the clock running, no Tick runs: five Tick intervals pass.
+    update_for(&mut app, Duration::from_secs(1));
+    assert_eq!(tick(&app), frozen_tick);
+    // Nor with the clock stopped does a Step run one.
+    send(&app, SimCommand::Pause);
+    send(&app, SimCommand::Step);
+    update_for(&mut app, Duration::from_millis(600));
+    assert_eq!(tick(&app), frozen_tick);
+
+    // Unfrozen, the clock is as it was left: stopped, until a Step or a Resume.
+    app.world_mut().resource_mut::<SimBridge>().unfreeze();
+    assert_eq!(frozen_at(&app), None);
+    update_for(&mut app, Duration::from_millis(600));
+    assert_eq!(tick(&app), frozen_tick);
+    step(&mut app);
+    assert_eq!(tick(&app), frozen_tick + 1);
+    send(&app, SimCommand::Resume);
+    update_until(&mut app, "the clock runs again", |app| {
+        tick(app) >= frozen_tick + 3
+    });
+}
+
+#[test]
+fn a_restored_simulation_reports_its_tick_count_from_the_start() {
+    let mut played = paused_app(app_with(Box::new(VacuumSource)));
+    for _ in 0..3 {
+        step(&mut played);
+    }
+    let captured = capture(&played);
+
+    let restored = SimStart::restored(captured, Box::new(VacuumSource)).expect("restored");
+    let resumed = paused_app(app_starting(restored));
+
+    // Before the simulation's own first report.
+    assert_eq!(tick(&resumed), 3);
 }

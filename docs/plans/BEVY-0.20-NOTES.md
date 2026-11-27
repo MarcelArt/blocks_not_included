@@ -107,6 +107,27 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **Texture types** (`Extent3d`, `TextureDimension`, `TextureFormat`, `TextureViewDescriptor`, `TextureViewDimension`) are under `bevy::render::render_resource`.
 - **Point lights.** The shadow switch is `PointLight::shadow_maps_enabled`. `EntityCommands::with_child(bundle)` hangs one from the camera.
 
+## Found in step 18
+
+- **States.**
+  - `StatesPlugin` (in `DefaultPlugins`; add `bevy::state::app::StatesPlugin` to `MinimalPlugins` in tests) puts the `StateTransition` schedule after `PreUpdate`. A `NextState` set in `PreUpdate` therefore takes effect before `Update` in the same frame. One set during `Update` waits for the next frame.
+  - `init_state` enables state-scoped entities by itself. Spawn with `DespawnOnExit(State::Variant)`.
+  - Sub-states: `#[derive(SubStates, …)]` with `#[source(Parent = Parent::Variant)]`, then `app.add_sub_state::<S>()`. `State<S>` exists only while the source state matches. Exit schedules run leaf first, enter schedules root first.
+  - `NextState` is an enum, `Unchanged | Pending(S) | PendingIfDifferent(S)`, so a system can read a transition requested earlier in the frame. `set` runs the transition schedules even when the state stays the same; `set_if_different` doesn't.
+  - `OnTransition { exited, entered }` exists.
+- **Run conditions and missing resources.** The executor evaluates run conditions before validating the system's parameters. A system gated by `in_state` can therefore take a resource that exists only in that state.
+  - All of a system's conditions, from separate `run_if` calls and from its sets, are evaluated every frame without short-circuiting.
+  - A condition that takes a missing `Res` panics through the default error handler. Use `resource_exists_and_changed` or `in_state(…).and(…)`, which does short-circuit.
+- **Commands.** `impl Command for T` needs `type Out = ();`. From a test, `app.world_mut().commands().queue(c)` then `app.world_mut().flush()`.
+- **egui's primary context** goes only to the first camera ever spawned: `setup_primary_egui_context_system` remembers in a `Local`. A camera spawned later, as when a World reopens, needs `PrimaryEguiContext` inserted by hand. Set `EguiGlobalSettings { auto_create_primary_context: false, .. }` so no other camera takes it first.
+- **Asset events** (`AssetEvent<A>`) are written in `PostUpdate`. A system in `Update` reads events from the previous frame's changes.
+- **Headless test apps.**
+  - The god tools' `Gizmos` need `bevy::gizmos::GizmoPlugin`. That plugin also needs `init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()`.
+  - Chunk meshes need `AssetPlugin`, `init_asset::<Mesh>()` and `init_asset::<StandardMaterial>()`.
+  - A camera with `PrimaryEguiContext` spawns without egui's plugin.
+  - `InputPlugin` turns `KeyboardInput` and `MouseButtonInput` messages into `ButtonInput` presses. Its `window` field can be any entity.
+- **Input.** `ButtonInput::reset_all()` clears pressed, just pressed and just released. A button still physically held then reads as up until it is pressed again, and its release sends no `just_released`. `Window::focused` defaults to `true`.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

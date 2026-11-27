@@ -40,6 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bevy::math::{EulerRot, Quat};
 use serde::{Deserialize, Serialize};
 use sim::{ElementTable, SimSettings};
 
@@ -94,6 +95,20 @@ pub struct PlayerState {
     pub yaw: f32,
     /// How far the view tilts up or down, in radians.
     pub pitch: f32,
+}
+
+impl PlayerState {
+    /// The player with `body`, whose camera is turned by `rotation`: about the vertical, then up
+    /// or down, as mouse look turns it.
+    pub fn new(body: Body, rotation: Quat) -> Self {
+        let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
+        Self { body, yaw, pitch }
+    }
+
+    /// The camera's rotation.
+    pub fn rotation(&self) -> Quat {
+        Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0)
+    }
 }
 
 /// Everything a World's save holds besides what the catalog lists.

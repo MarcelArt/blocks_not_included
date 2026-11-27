@@ -8,6 +8,9 @@
 //! off the main thread. The normal look of every Chunk is hidden, Dormant ones included, so the
 //! Overlay is all there is to see, against a dark, neutral background: the sky's blue showing
 //! through every layer would make the Temperature Overlay look colder than it is.
+//!
+//! Each World starts with no Overlay. Closing it despawns the Overlay's meshes and drops the
+//! meshing under way.
 
 mod mesh;
 mod ramp;
@@ -25,6 +28,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use sim::{ActiveRegion, ChunkPos, Phase};
 
 use crate::render::{ChunkMesh, ChunkNeighbourhood, face_neighbours, take_nearest};
+use crate::session::{Session, SessionSystems};
 use crate::sim_bridge::{Elements, SimFocus};
 use crate::world::WorldView;
 use mesh::{OverlayLooks, mesh_overlay};
@@ -40,25 +44,39 @@ const OVERLAY_BACKGROUND: Color = Color::srgb(0.06, 0.06, 0.07);
 /// Overlay has started meshing all of them within two frames.
 const MESHING_STARTS_PER_FRAME: usize = 16;
 
-/// The Overlays, and the key that cycles through them. Needs the sim bridge, the Chunk meshes,
-/// and `EguiPlugin`.
+/// The Overlays, and the key that cycles through them, while a World is open. Needs the session,
+/// the sim bridge, the Chunk meshes, and `EguiPlugin`.
 pub struct OverlayPlugin;
 
 impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
+        let open = in_state(Session::Open);
         app.init_resource::<ShownOverlay>()
-            .add_systems(Startup, set_up_overlay_meshes)
+            .add_systems(
+                OnEnter(Session::Open),
+                set_up_overlay_meshes.in_set(SessionSystems::Build),
+            )
+            // Meshing under way is dropped, which cancels it. The entities go by `DespawnOnExit`,
+            // and the background returns to normal as the Overlay goes.
+            .add_systems(
+                OnExit(Session::Open),
+                |mut commands: Commands, mut shown: ResMut<ShownOverlay>| {
+                    commands.remove_resource::<OverlayMeshes>();
+                    shown.set_if_neq(ShownOverlay::default());
+                },
+            )
             .add_systems(
                 Update,
                 (
-                    cycle_overlay.run_if(not(egui_wants_any_keyboard_input)),
-                    use_overlay_looks.run_if(
-                        resource_changed::<ShownOverlay>.or_else(resource_changed::<Elements>),
+                    cycle_overlay
+                        .run_if(open.clone())
+                        .run_if(not(egui_wants_any_keyboard_input)),
+                    use_overlay_looks.run_if(open.clone()).run_if(
+                        resource_changed::<ShownOverlay>
+                            .or_else(resource_exists_and_changed::<Elements>),
                     ),
                     set_background.run_if(resource_changed::<ShownOverlay>),
-                    follow_world_view,
-                    start_meshing,
-                    finish_meshing,
+                    (follow_world_view, start_meshing, finish_meshing).run_if(open.clone()),
                 )
                     .chain(),
             )
@@ -67,7 +85,7 @@ impl Plugin for OverlayPlugin {
                 PostUpdate,
                 hide_normal_look.before(VisibilitySystems::VisibilityPropagate),
             )
-            .add_systems(EguiPrimaryContextPass, draw_legend);
+            .add_systems(EguiPrimaryContextPass, draw_legend.run_if(open));
     }
 }
 
@@ -323,6 +341,7 @@ fn finish_meshing(
                 let entity = commands
                     .spawn((
                         OverlayMesh(pos),
+                        DespawnOnExit(Session::Open),
                         Mesh3d(mesh_assets.add(mesh)),
                         MeshMaterial3d(material.clone()),
                         Transform::from_translation(

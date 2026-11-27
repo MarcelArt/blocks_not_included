@@ -1,6 +1,9 @@
 //! Drawing the world: every Chunk in [`WorldView`] has its solid Cells drawn as flat-coloured
 //! cubes, its liquids as translucent volumes, and its tinted gases as a faint haze, remeshed off
 //! the main thread whenever they change. [`ScenePlugin`] adds the sky and the sun.
+//!
+//! All of it lasts as long as the World: closing it despawns every Chunk's meshes and drops the
+//! meshing under way, so none of it is drawn in the next World.
 
 mod fluids;
 mod mesher;
@@ -17,6 +20,7 @@ use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use sim::{CellPos, ChunkPos};
 
+use crate::session::{Session, SessionSystems};
 use crate::sim_bridge::{Elements, SimFocus, distance_squared};
 use crate::world::WorldView;
 use fluids::{FluidLooks, mesh_fluids};
@@ -33,20 +37,29 @@ pub use scene::ScenePlugin;
 const MESHING_STARTS_PER_FRAME: usize = 16;
 
 /// Draws the solid, liquid and tinted gas Cells of every Chunk in [`WorldView`], and keeps them up
-/// to date. Needs the sim bridge.
+/// to date, while a World is open. Needs the session and the sim bridge.
 pub struct ChunkMeshPlugin;
 
 impl Plugin for ChunkMeshPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, set_up_chunk_meshes).add_systems(
+        app.add_systems(
+            OnEnter(Session::Open),
+            set_up_chunk_meshes.in_set(SessionSystems::Build),
+        )
+        // Meshing under way is dropped, which cancels it. The entities go by `DespawnOnExit`.
+        .add_systems(OnExit(Session::Open), |mut commands: Commands| {
+            commands.remove_resource::<ChunkMeshes>();
+        })
+        .add_systems(
             Update,
             (
-                use_element_colors.run_if(resource_changed::<Elements>),
+                use_element_colors.run_if(resource_exists_and_changed::<Elements>),
                 follow_world_view,
                 start_meshing,
                 finish_meshing,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(Session::Open)),
         );
     }
 }
@@ -251,6 +264,7 @@ fn finish_meshing(
                     let origin = pos.origin();
                     let mut spawned = commands.spawn((
                         ChunkMesh { pos, layer },
+                        DespawnOnExit(Session::Open),
                         Mesh3d(mesh_assets.add(mesh)),
                         MeshMaterial3d(materials[layer.index()].clone()),
                         Transform::from_translation(

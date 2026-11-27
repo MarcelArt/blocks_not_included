@@ -8,6 +8,7 @@ use sim::{Cell, ElementTable, Phase};
 
 use crate::player::raycast::REACH;
 use crate::player::{AwaitingSpawn, Player};
+use crate::session::Session;
 use crate::sim_bridge::Elements;
 use crate::tools::Aim;
 use crate::world::WorldView;
@@ -15,13 +16,16 @@ use crate::world::WorldView;
 /// How far each arm of the crosshair reaches from the centre of the screen, in points.
 const CROSSHAIR_ARM: f32 = 6.0;
 
-/// The crosshair and the readout panel. Needs the sim bridge, the player, the god tools (for the
-/// Cell in view) and `EguiPlugin`.
+/// The crosshair and the readout panel, while a World is open. Needs the session, the sim
+/// bridge, the player, the god tools (for the Cell in view) and `EguiPlugin`.
 pub struct ReadoutPlugin;
 
 impl Plugin for ReadoutPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(EguiPrimaryContextPass, (draw_crosshair, draw_readout));
+        app.add_systems(
+            EguiPrimaryContextPass,
+            (draw_crosshair, draw_readout).run_if(in_state(Session::Open)),
+        );
     }
 }
 

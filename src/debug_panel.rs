@@ -3,15 +3,17 @@
 //! problem with a file shows the panel.
 //!
 //! P stops the clock and starts it again, and N runs one Tick while it is stopped. The panel's
-//! buttons do the same, once Esc has freed the cursor.
+//! buttons do the same while Alt holds the cursor free. While the World is paused, the clock
+//! can't be changed: it stays as it was, to carry on as before once the World resumes.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 
+use crate::input_policy::InputPolicy;
 use crate::readout::group_thousands;
+use crate::session::{Play, Session, SessionSystems};
 use crate::sim_bridge::{SimBridge, SimCommand, SimReport, TickRate};
 use crate::sim_files::{FileStatus, SimFileStatus};
 
@@ -23,22 +25,35 @@ const STEP_KEY: KeyCode = KeyCode::KeyN;
 /// stretch the panel across the screen.
 const PANEL_WIDTH: f32 = 320.0;
 
-/// The debug panel, and the keys for the simulation's clock. Needs the sim bridge, the
-/// simulation files, and `EguiPlugin`.
+/// The debug panel, and the keys for the simulation's clock, while a World is open. Needs the
+/// session, the input policy, the sim bridge, the simulation files, and `EguiPlugin`.
 pub struct DebugPanelPlugin;
 
 impl Plugin for DebugPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugPanel>()
             .init_resource::<SimClock>()
+            // Each World's clock starts running.
+            .add_systems(
+                OnEnter(Session::Open),
+                (|mut clock: ResMut<SimClock>| *clock = SimClock::default())
+                    .in_set(SessionSystems::Build),
+            )
             .add_systems(
                 Update,
                 (
-                    (toggle_panel, use_clock_keys).run_if(not(egui_wants_any_keyboard_input)),
+                    (
+                        toggle_panel.run_if(in_state(Session::Open)),
+                        use_clock_keys.run_if(in_state(Play::Running)),
+                    )
+                        .run_if(not(egui_wants_any_keyboard_input)),
                     show_new_problems.run_if(resource_changed::<SimFileStatus>),
                 ),
             )
-            .add_systems(EguiPrimaryContextPass, draw_panel);
+            .add_systems(
+                EguiPrimaryContextPass,
+                draw_panel.run_if(in_state(Session::Open)),
+            );
     }
 }
 
@@ -62,11 +77,12 @@ enum ClockAction {
     Step,
 }
 
-/// The simulation's clock, as the panel and the keys control it.
+/// The simulation's clock, as the panel and the keys control it, while the World runs.
 #[derive(SystemParam)]
 struct Clock<'w> {
     state: ResMut<'w, SimClock>,
     bridge: Res<'w, SimBridge>,
+    play: Res<'w, State<Play>>,
 }
 
 impl Clock<'_> {
@@ -74,7 +90,15 @@ impl Clock<'_> {
         self.state.paused
     }
 
+    /// Whether the clock can be changed: only while the World runs.
+    fn usable(&self) -> bool {
+        *self.play.get() == Play::Running
+    }
+
     fn apply(&mut self, action: ClockAction) {
+        if !self.usable() {
+            return;
+        }
         let command = match action {
             ClockAction::Pause => {
                 self.state.paused = true;
@@ -127,8 +151,9 @@ fn show_new_problems(
     *before = status.clone();
 }
 
-/// Draws the panel while it is shown. While the cursor is captured, clicks pass through it, as
-/// they do through the god tools' palette.
+/// Draws the panel while it is shown. During gameplay, with the cursor captured, clicks pass
+/// through it, as they do through the god tools' palette. While the World is paused, its clock
+/// buttons are greyed out.
 fn draw_panel(
     mut contexts: EguiContexts,
     panel: Res<DebugPanel>,
@@ -136,12 +161,13 @@ fn draw_panel(
     rate: Res<TickRate>,
     files: Res<SimFileStatus>,
     mut clock: Clock,
-    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    policy: Res<InputPolicy>,
 ) -> Result {
     if !panel.shown {
         return Ok(());
     }
-    let captured = cursor.grab_mode != CursorGrabMode::None;
+    let captured = policy.gameplay;
+    let world_runs = clock.usable();
     let mut action = None;
     egui::Window::new("Simulation")
         .anchor(egui::Align2::LEFT_BOTTOM, [8.0, -8.0])
@@ -158,15 +184,19 @@ fn draw_panel(
                     ("Resume (P)", !running, ClockAction::Resume),
                     ("Step (N)", !running, ClockAction::Step),
                 ] {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                    let button = egui::Button::new(label);
+                    if ui.add_enabled(world_runs && enabled, button).clicked() {
                         action = Some(chosen);
                     }
                 }
             });
+            if !world_runs {
+                ui.weak("The World is paused. Its clock carries on as it was once it resumes.");
+            }
             ui.separator();
             for (path, status) in files.files() {
                 match status {
-                    FileStatus::AsStarted => ui.weak(format!("{path}: as the game started")),
+                    FileStatus::AsStarted => ui.weak(format!("{path}: as the World started")),
                     FileStatus::Applied { tick } => ui.label(format!(
                         "{path}: reloaded at Tick {}",
                         group_thousands(&tick.to_string())

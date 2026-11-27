@@ -1,5 +1,5 @@
 //! The sky, its light, which dims where little of the sky shows, the sun, and a lamp by the
-//! camera. The camera is the player's (`crate::player`).
+//! camera. The camera is the player's (`crate::player`). The sun lasts as long as the World.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::CascadeShadowConfigBuilder;
@@ -10,6 +10,7 @@ use bevy::render::render_resource::{
 use sim::{CHUNK_SIZE, CellPos, Phase};
 
 use crate::player::raycast::raycast;
+use crate::session::{Session, SessionSystems};
 use crate::sim_bridge::{Elements, RENDER_DISTANCE};
 use crate::world::WorldView;
 
@@ -80,7 +81,7 @@ const LAMP_OFFSET: Vec3 = Vec3::new(0.0, 0.4, 1.0);
 const LAMP_COLOR: Color = Color::srgb(1.0, 0.95, 0.86);
 
 /// The sky colour and its light, which dims where little of the sky shows, the sun, and the lamp
-/// that lights the player's way where the sky doesn't. Needs the sim bridge.
+/// that lights the player's way where the sky doesn't. Needs the session and the sim bridge.
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
@@ -88,14 +89,22 @@ impl Plugin for ScenePlugin {
         app.insert_resource(ClearColor(SKY))
             // The sky light takes its place.
             .insert_resource(GlobalAmbientLight::NONE)
-            .add_systems(Startup, (spawn_sun, make_sky_light))
-            .add_systems(Update, (light_cameras_with_the_sky, follow_daylight));
+            .add_systems(Startup, make_sky_light)
+            .add_systems(
+                OnEnter(Session::Open),
+                spawn_sun.in_set(SessionSystems::Build),
+            )
+            .add_systems(
+                Update,
+                (light_cameras_with_the_sky, follow_daylight).run_if(in_state(Session::Open)),
+            );
     }
 }
 
 fn spawn_sun(mut commands: Commands) {
     let render_distance = (RENDER_DISTANCE.horizontal as usize * CHUNK_SIZE) as f32;
     commands.spawn((
+        DespawnOnExit(Session::Open),
         DirectionalLight {
             illuminance: SUN_ILLUMINANCE,
             shadow_maps_enabled: true,
