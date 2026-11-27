@@ -2,11 +2,12 @@
 //! (`docs/plans/18-world-sessions.md`).
 //!
 //! Nothing of a World exists until it opens. [`OpenWorld`] opens one from a [`WorldStart`]:
-//! a new World ([`WorldStart::new_game`]), whose player spawns on the ground, or a saved one
-//! ([`WorldStart::load_game`]), whose player carries on exactly as saved. While it is open, the
-//! state is [`Session::Open`]: the simulation thread runs, and the World's resources, entities and
-//! background work exist. [`CloseWorld`] closes it, and all of that goes with it: the simulation
-//! thread shuts down, its resources are removed, entities marked
+//! a new World ([`WorldStart::new_game`]), saved before its first Tick with its player standing
+//! on the ground, or a saved one ([`WorldStart::load_game`]). Either way, the player carries on
+//! exactly as saved. A [`WorldStart`] without a player spawns them on the ground. While it is
+//! open, the state is [`Session::Open`]: the simulation thread runs, and the World's resources,
+//! entities and background work exist. [`CloseWorld`] closes it, and all of that goes with it:
+//! the simulation thread shuts down, its resources are removed, entities marked
 //! `DespawnOnExit(Session::Open)` are despawned (the player and its camera, the sun, every
 //! Chunk's and Overlay's meshes), and meshing under way is dropped. The next World starts from
 //! nothing of the last.
@@ -20,21 +21,30 @@
 //! with the debug clock as it was, and sends the latest hot reload held back meanwhile.
 //! [`PauseControl`] asks for these transitions. Esc does both (`crate::input_policy`).
 //!
+//! Leaving a World ([`Play::Leaving`]) pauses it the same way, but neither Esc nor
+//! [`PauseControl::resume`] runs it again: only [`PauseControl::stay`] does, for a player who
+//! changes their mind. It holds the World still while its last save is written
+//! (`crate::lifecycle`).
+//!
 //! Opening a World runs, in `OnEnter(Session::Open)`, the [`SessionSystems::Start`] systems,
 //! which start the simulation and insert the World's resources, then the
 //! [`SessionSystems::Build`] systems, which build on them.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::state::state::FreelyMutableState;
-use sim::{CheckpointError, ElementTable, SimSettings};
+use sim::{CheckpointError, ElementTable, Phase, SimSettings};
 use worldgen::MissingElements;
 
+use crate::player::movement::Body;
+use crate::player::{feet_in, ground_below, ground_column, spawn_facing};
 use crate::saves::{PlayerState, WorldSave};
 use crate::sim_bridge::{PendingSim, SimBridge, SimStart};
+use crate::world::locate;
 
 /// Whether a World is open.
 #[derive(States, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -57,6 +67,9 @@ pub enum Play {
     /// Paused, and acknowledged: the simulation has stopped between two Ticks, after every
     /// command sent before the pause.
     Paused,
+    /// Paused while the player leaves the World, for as long as its last save takes. Nothing the
+    /// player does reaches the World, and only [`PauseControl::stay`] runs it again.
+    Leaving,
 }
 
 /// The order of the systems that open a World, in `OnEnter(Session::Open)`.
@@ -78,11 +91,14 @@ pub struct WorldStart {
 }
 
 impl WorldStart {
-    /// A new World generated from `seed`, simulated with `elements` under `settings`. Its player
-    /// spawns on the ground at the origin.
+    /// A new World generated from `seed`, simulated with `elements` under `settings`, and its
+    /// first save. Its player stands on the ground at the origin, where [`ground_below`] puts
+    /// them, facing as [`spawn_facing`] says, and the focus is at their feet. The save holds
+    /// exactly the World this opens: the player, and the simulation before its first Tick.
     ///
     /// This finds the ground at the origin, generating the Chunks above it from the top of the
-    /// world down, so a caller may prefer to build it on another thread.
+    /// world down, and generates the Active Region around it, so a caller may prefer to build it
+    /// on another thread.
     ///
     /// # Panics
     ///
@@ -91,11 +107,26 @@ impl WorldStart {
         seed: u64,
         elements: ElementTable,
         settings: SimSettings,
-    ) -> Result<Self, MissingElements> {
-        Ok(Self {
-            sim: SimStart::generated(seed, elements, settings)?,
-            player: None,
-        })
+    ) -> Result<(Self, WorldSave), MissingElements> {
+        let mut sim = SimStart::generated(seed, elements, settings)?;
+        let focus = sim.focus();
+        let column: HashMap<_, _> = ground_column(focus)
+            .filter_map(|chunk| Some((chunk, sim.generate(chunk)?)))
+            .collect();
+        let feet = ground_below(focus, |pos| {
+            let (chunk, index) = locate(pos);
+            column
+                .get(&chunk)
+                .is_some_and(|cells| sim.elements().get(cells[index].element).phase == Phase::Solid)
+        });
+        sim.set_focus(feet);
+        let player = PlayerState::new(Body::standing_at(feet_in(feet)), spawn_facing());
+        let (sim, capture) = sim.capture_before_start();
+        let start = Self {
+            sim,
+            player: Some(player),
+        };
+        Ok((start, WorldSave { capture, player }))
     }
 
     /// The World `save` holds, with its terrain generated from its World Seed and the
@@ -267,12 +298,33 @@ impl PauseControl<'_> {
         }
     }
 
-    /// Pauses the World if it runs, or runs it if it is paused.
+    /// Pauses the World if it runs, or runs it if it is paused. Does nothing while the player
+    /// leaves it.
     pub fn toggle(&mut self) {
         match self.state() {
             Some(Play::Running) => self.pause(),
             Some(Play::Pausing | Play::Paused) => self.resume(),
-            None => {}
+            Some(Play::Leaving) | None => {}
+        }
+    }
+
+    /// Holds the World paused while the player leaves it ([`Play::Leaving`]). Returns what it was
+    /// doing before, for [`stay`](Self::stay), or `None` if no World will be open.
+    pub fn leave(&mut self) -> Option<Play> {
+        let before = self.state()?;
+        self.set(Play::Leaving);
+        Some(before)
+    }
+
+    /// Stops leaving the World: runs it again if it ran before (`back_to`), or pauses it.
+    pub fn stay(&mut self, back_to: Play) {
+        if self.state() == Some(Play::Leaving) {
+            self.set(if back_to == Play::Running {
+                Play::Running
+            } else {
+                // The simulation is frozen already, so the pause completes at once.
+                Play::Pausing
+            });
         }
     }
 

@@ -5,6 +5,8 @@
 
 pub mod debug_panel;
 pub mod input_policy;
+pub mod lifecycle;
+pub mod menu;
 pub mod overlay;
 pub mod player;
 pub mod readout;

@@ -3,9 +3,9 @@
 //! watch `assets/` for changes: this crate's default `dev` feature turns on Bevy's `file_watcher`.
 //!
 //! The assets load, and are watched, for as long as the game runs. A new World's simulation starts
-//! from the files as [`SimStart::sandbox`] reads them, and a saved World's from the rules it was
-//! saved with. Either way, only a version of a file that loads while the World is open counts:
-//! it goes to that World's simulation as a [`SimCommand::ReplaceElements`] or
+//! from the files as [`read_rules`] reads them as the World is created, and a saved World's from
+//! the rules it was saved with. Either way, only a version of a file that loads while the World is
+//! open counts: it goes to that World's simulation as a [`SimCommand::ReplaceElements`] or
 //! [`SimCommand::ReplaceSettings`]. Versions that load while no World is open, or as one opens,
 //! are dropped, so a saved World keeps its own rules until a file changes during play. While the
 //! World is paused, the latest version of each file is held back, and sent once it runs again.
@@ -14,14 +14,15 @@
 //! [`SimFileStatus`] and the log, and the simulation keeps the version before. Once the
 //! simulation takes up an Element table, the sim bridge puts it in
 //! [`Elements`](crate::sim_bridge::Elements), and every Chunk is remeshed in its colours.
-//!
-//! [`SimStart::sandbox`]: crate::sim_bridge::SimStart::sandbox
 
 use std::fmt;
+use std::fs;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
 
 use bevy::asset::io::Reader;
+use bevy::asset::io::file::FileAssetReader;
 use bevy::asset::{AssetLoadError, AssetLoadFailedEvent, AssetLoader, LoadContext};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -149,6 +150,45 @@ impl fmt::Display for SimFileError {
 }
 
 impl std::error::Error for SimFileError {}
+
+/// The `assets` folder, where Bevy's asset server finds it: beside the executable, or under
+/// `BEVY_ASSET_ROOT` or `CARGO_MANIFEST_DIR` if either is set.
+pub fn assets_folder() -> PathBuf {
+    FileAssetReader::new("assets").root_path().clone()
+}
+
+/// The rules a new World starts with: both simulation files in the `assets` folder at `assets`,
+/// read and checked as they are now.
+pub fn read_rules(assets: &Path) -> Result<(ElementTable, SimSettings), RulesFileError> {
+    let ElementsFile(elements) = read_file(assets)?;
+    let SettingsFile(settings) = read_file(assets)?;
+    Ok((elements, settings))
+}
+
+fn read_file<F: SimFile>(assets: &Path) -> Result<F, RulesFileError> {
+    let error = |error| RulesFileError {
+        path: F::PATH,
+        error,
+    };
+    let bytes = fs::read(assets.join(F::PATH)).map_err(|err| error(SimFileError::Io(err)))?;
+    F::parse(&bytes).map_err(error)
+}
+
+/// Why a simulation file can't give a new World its rules.
+#[derive(Debug)]
+pub struct RulesFileError {
+    /// The file, within `assets/`.
+    pub path: &'static str,
+    pub error: SimFileError,
+}
+
+impl fmt::Display for RulesFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.path, self.error)
+    }
+}
+
+impl std::error::Error for RulesFileError {}
 
 /// What became of the latest version of each simulation file, for the debug panel.
 #[derive(Resource, Clone, Debug, Default, PartialEq)]

@@ -10,7 +10,8 @@
 //!
 //! The simulation thread runs only while a World is open ([`Session::Open`]). A [`SimStart`] says
 //! what it starts from: a fresh world ([`SimStart::fresh`], [`SimStart::generated`]) or a capture
-//! ([`SimStart::restored`]). Opening a World starts the thread and inserts the World's resources:
+//! ([`SimStart::restored`]). A fresh world can be built and captured before its thread starts
+//! ([`SimStart::capture_before_start`]), for a new World's first save. Opening a World starts the thread and inserts the World's resources:
 //! [`SimBridge`], [`Elements`], [`SimFocus`], [`WorldView`], [`SimReport`] and [`TickRate`].
 //! Closing it removes them all and shuts the thread down, so nothing that thread sends reaches
 //! the next World, which starts from nothing.
@@ -34,14 +35,11 @@
 //! the clock.
 
 use std::collections::{HashSet, VecDeque};
-use std::fs;
 use std::ops::ControlFlow;
-use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bevy::asset::io::file::FileAssetReader;
 use bevy::prelude::*;
 // Not `std::sync::mpsc`: crossbeam's `Receiver` is `Sync`, so the game's end of a channel can sit
 // in a `Resource` without a `Mutex`, and its `recv_deadline`, which the simulation's clock waits
@@ -55,11 +53,7 @@ use sim::{
 use worldgen::{Generator, MissingElements};
 
 use crate::session::{Play, Session, SessionSystems};
-use crate::sim_files::{ElementsFile, SettingsFile, SimFile};
 use crate::world::{WorldView, locate};
-
-/// The seed the Sim Sandbox world is generated from.
-pub const WORLD_SEED: u64 = 2026;
 
 /// Real time between Ticks: 5 Ticks per second, each covering 0.2 s of simulated time.
 pub const TICK_INTERVAL: Duration = Duration::from_millis(200);
@@ -226,8 +220,8 @@ enum Start {
         settings: SimSettings,
         source: Box<dyn ChunkSource>,
     },
-    /// It takes this one, restored from a checkpoint.
-    Restored(Box<Simulation>),
+    /// It takes this one: restored from a checkpoint, or built and focused already.
+    Built(Box<Simulation>),
 }
 
 impl SimStart {
@@ -314,39 +308,92 @@ impl SimStart {
             generation,
             focus: sim.focus(),
             tick_count,
-            start: Start::Restored(Box::new(sim)),
+            start: Start::Built(Box::new(sim)),
         })
-    }
-
-    /// The Sim Sandbox: Elements from `assets/elements.ron`, settings from
-    /// `assets/sim_settings.ron`, as the files are now, and a world generated from [`WORLD_SEED`].
-    ///
-    /// # Panics
-    ///
-    /// If either file can't be read or parsed, or the Elements lack one the world is made of.
-    pub fn sandbox() -> Self {
-        let assets = FileAssetReader::new("assets").root_path().clone();
-        let ElementsFile(elements) = read_sim_file(&assets);
-        let SettingsFile(settings) = read_sim_file(&assets);
-        Self::generated(WORLD_SEED, elements, settings).unwrap_or_else(|err| panic!("{err}"))
     }
 
     /// Where the focus starts.
     pub fn focus(&self) -> CellPos {
         self.focus
     }
+
+    /// Moves where the focus starts.
+    pub fn set_focus(&mut self, pos: CellPos) {
+        self.focus = pos;
+    }
+
+    /// The Element table the simulation starts with.
+    pub fn elements(&self) -> &ElementTable {
+        &self.elements
+    }
+
+    /// For a fresh simulation not built yet, the Chunk at `pos` as its source generates it: what
+    /// the simulation will start with there. `None` otherwise.
+    pub fn generate(&self, pos: ChunkPos) -> Option<Vec<Cell>> {
+        match &self.start {
+            Start::Fresh { source, .. } => Some(source.generate(pos)),
+            Start::Built(_) => None,
+        }
+    }
+
+    /// Builds the simulation now, focused where the focus starts, as its thread would before its
+    /// first Tick, and captures it: for a new World's first save. The thread then starts with
+    /// exactly the simulation captured.
+    ///
+    /// Generating the Active Region takes a while, so a caller may prefer another thread.
+    pub fn capture_before_start(self) -> (SimStart, SimCapture) {
+        let Self {
+            elements,
+            generation,
+            focus,
+            tick_count,
+            start,
+        } = self;
+        let sim = match start {
+            Start::Fresh {
+                elements,
+                settings,
+                source,
+            } => {
+                let mut sim = build(elements, settings, source);
+                sim.focus_on(focus);
+                sim
+            }
+            Start::Built(sim) => *sim,
+        };
+        let capture = capture_of(&sim, &generation);
+        let start = Self {
+            elements,
+            generation,
+            focus,
+            tick_count,
+            start: Start::Built(Box::new(sim)),
+        };
+        (start, capture)
+    }
 }
 
-/// Reads and parses `F` from the `assets` folder at `assets`.
-///
-/// # Panics
-///
-/// If the file can't be read, or can't be used.
-fn read_sim_file<F: SimFile>(assets: &Path) -> F {
-    let path = assets.join(F::PATH);
-    let bytes =
-        fs::read(&path).unwrap_or_else(|err| panic!("can't read {}: {err}", path.display()));
-    F::parse(&bytes).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+/// A new simulation of `elements` under `settings`, whose Chunks come from `source`. The settings
+/// were validated as the [`SimStart`] was built.
+fn build(
+    elements: ElementTable,
+    settings: SimSettings,
+    source: Box<dyn ChunkSource>,
+) -> Simulation {
+    let mut sim = Simulation::with_source(elements, source);
+    sim.set_settings(settings)
+        .expect("SimStart validated the settings");
+    sim
+}
+
+/// `sim` as it stands, with its rules and what its terrain comes from.
+fn capture_of(sim: &Simulation, generation: &Option<Generation>) -> SimCapture {
+    SimCapture {
+        checkpoint: sim.checkpoint(),
+        elements: sim.elements().clone(),
+        settings: sim.settings().clone(),
+        generation: generation.clone(),
+    }
 }
 
 /// The [`SimStart`] of the World about to open. `crate::session::OpenWorld` inserts it, and
@@ -375,10 +422,20 @@ impl Plugin for SimBridgePlugin {
             )
             // While paused, the focus stays where it is: the simulation hears of any change once
             // the World runs again.
-            .add_systems(PostUpdate, follow_focus.run_if(in_state(Play::Running)))
+            .add_systems(
+                PostUpdate,
+                follow_focus
+                    .in_set(SendFocus)
+                    .run_if(in_state(Play::Running)),
+            )
             .add_systems(Last, shut_down_on_exit);
     }
 }
+
+/// The system that sends the simulation each change of [`SimFocus`], in `PostUpdate`. A command
+/// sent after it, in the same frame, reaches the simulation after the focus the frame ended with.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SendFocus;
 
 /// What the bridge's own systems keep for the World open.
 #[derive(Resource, Default)]
@@ -464,13 +521,8 @@ impl SimBridge {
                         elements,
                         settings,
                         source,
-                    } => {
-                        let mut sim = Simulation::with_source(elements, source);
-                        sim.set_settings(settings)
-                            .expect("SimBridgePlugin validated the settings");
-                        sim
-                    }
-                    Start::Restored(sim) => *sim,
+                    } => build(elements, settings, source),
+                    Start::Built(sim) => *sim,
                 };
                 SimThread::new(sim, generation, command_receiver, update_sender).run();
             })
@@ -892,12 +944,7 @@ impl SimThread {
 
     /// The simulation as it stands, with its rules and what its terrain comes from.
     fn capture(&self) -> SimCapture {
-        SimCapture {
-            checkpoint: self.sim.checkpoint(),
-            elements: self.sim.elements().clone(),
-            settings: self.sim.settings().clone(),
-            generation: self.generation.clone(),
-        }
+        capture_of(&self.sim, &self.generation)
     }
 
     /// Moves the focus to `pos`, and logs where the Active Region goes if it moves.

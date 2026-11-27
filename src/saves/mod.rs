@@ -666,7 +666,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// 64 random bits: from the system's randomness, which seeds `RandomState`, mixed with the time
 /// and a count so no two calls repeat.
-fn random_u64() -> u64 {
+pub(crate) fn random_u64() -> u64 {
     static CALLS: AtomicU64 = AtomicU64::new(0);
     let call = CALLS.fetch_add(1, AtomicOrdering::Relaxed);
     RandomState::new().hash_one((SystemTime::now(), call, std::process::id()))

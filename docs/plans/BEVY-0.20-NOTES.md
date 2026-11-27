@@ -117,7 +117,7 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
   - `OnTransition { exited, entered }` exists.
 - **Run conditions and missing resources.** The executor evaluates run conditions before validating the system's parameters. A system gated by `in_state` can therefore take a resource that exists only in that state.
   - All of a system's conditions, from separate `run_if` calls and from its sets, are evaluated every frame without short-circuiting.
-  - A condition that takes a missing `Res` panics through the default error handler. Use `resource_exists_and_changed` or `in_state(…).and(…)`, which does short-circuit.
+  - A condition that takes a missing `Res` panics through the default error handler. Use `resource_exists_and_changed` or `in_state(…).and_then(…)`, which does short-circuit. (The combinator is `and_then`, like `or_else`; there is no `and`.)
 - **Commands.** `impl Command for T` needs `type Out = ();`. From a test, `app.world_mut().commands().queue(c)` then `app.world_mut().flush()`.
 - **egui's primary context** goes only to the first camera ever spawned: `setup_primary_egui_context_system` remembers in a `Local`. A camera spawned later, as when a World reopens, needs `PrimaryEguiContext` inserted by hand. Set `EguiGlobalSettings { auto_create_primary_context: false, .. }` so no other camera takes it first.
 - **Asset events** (`AssetEvent<A>`) are written in `PostUpdate`. A system in `Update` reads events from the previous frame's changes.
@@ -127,6 +127,19 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
   - A camera with `PrimaryEguiContext` spawns without egui's plugin.
   - `InputPlugin` turns `KeyboardInput` and `MouseButtonInput` messages into `ButtonInput` presses. Its `window` field can be any entity.
 - **Input.** `ButtonInput::reset_all()` clears pressed, just pressed and just released. A button still physically held then reads as up until it is pressed again, and its release sends no `just_released`. `Window::focused` defaults to `true`.
+
+## Found in step 19
+
+- **The window's close button.** `WindowPlugin { close_when_requested: false, .. }` leaves `WindowCloseRequested` messages to the game: nothing closes until it writes `AppExit`. A plugin that reads them should `add_message::<WindowCloseRequested>()` itself, so headless tests (no `WindowPlugin`) can send them. `App::should_exit()` reports an `AppExit` written in the last two frames.
+- **A clock for tests.** `TimeUpdateStrategy::ManualDuration(d)` moves `Time<Real>` by exactly `d` each `app.update()`. `Time<Virtual>` (the plain `Time`) clamps each step to `max_delta`, 250 ms by default, so count play time in `Time<Real>`. Set it to `Duration::ZERO` while a test waits in real time, so play time doesn't creep.
+- **egui 0.36.**
+  - A button's label follows its parent `Ui`'s layout: inside `ui.vertical_centered(…)`, a wide button's label is centred; otherwise it sits on the left.
+  - `CentralPanel::show` now takes a `Ui`, not a `Context`. A centred `egui::Window` with `.title_bar(false)` and `.anchor(Align2::CENTER_CENTER, …)` works as a full-screen menu's page.
+  - `egui::Modal::new(id).backdrop_color(…).show(ctx, …)` dims everything behind it and takes the pointer. Its response's `should_close()` can be ignored.
+  - `TextEdit::id(id)` plus `ui.memory_mut(|m| m.request_focus(id))` focuses a field that only appears next frame.
+  - One-line text that may run long: `LayoutJob::single_section(text, TextFormat::simple(font, color))` with `job.wrap = TextWrapping::truncate_at_width(w)`, then `painter.layout_job(job)` and `painter.galley(pos, galley, color)`.
+- **Agent checks of egui menus in a real window.** bevy_egui reads the pointer from `WindowEvent` messages, so a harness can click: write `WindowEvent::CursorMoved(CursorMoved { window, position, delta: None })`, then `WindowEvent::MouseButtonInput` pressed and released, in logical pixels. Typing is `KeyboardInput` with `logical_key: Key::Character(…)`; a space must be `Key::Space`.
+- **Math.** `Quat::angle_between` can't tell rotations less than about 7e-4 rad apart from equal in `f32`: its `acos` of a dot product near 1 loses precision.
 
 ## Threads and tasks
 

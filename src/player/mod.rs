@@ -6,9 +6,11 @@
 //! and Shift sinks. In a liquid, holding Space swims upward. While Alt is held, the body takes no
 //! input but still falls, swims and slides; while the World is paused, it doesn't move at all.
 //!
-//! A new World's player spawns on the ground below the focus. A saved World's player carries on
-//! exactly as saved: where they were, looking the same way, moving as they were. Either is held
-//! in place until the Chunks around them have loaded.
+//! A World opened without a player spawns them on the ground below the focus ([`ground_below`]).
+//! A saved World's player carries on exactly as saved: where they were, looking the same way,
+//! moving as they were. A new World from the main menu is saved before it opens, with its player
+//! already standing on that ground, so it opens as saved. Either way, the player is held in place
+//! until the Chunks around them have loaded.
 
 pub mod collision;
 pub mod movement;
@@ -88,16 +90,22 @@ pub enum AwaitingSpawn {
     AsSaved,
 }
 
+/// Which way a new player faces: along +x and +z, away from the sun.
+pub fn spawn_facing() -> Quat {
+    Transform::default()
+        .looking_to(Vec3::new(1.0, 0.0, 1.0), Vec3::Y)
+        .rotation
+}
+
 /// Spawns the player with the World, held in place until the Chunks around them load: as saved,
-/// or at the focus, facing along +x and +z, away from the sun. Their camera holds egui's primary
-/// context, which a new camera doesn't otherwise get once the first World's camera is gone.
+/// or at the focus, facing as [`spawn_facing`] says. Their camera holds egui's primary context,
+/// which a new camera doesn't otherwise get once the first World's camera is gone.
 fn spawn_player(mut commands: Commands, start: Res<PlayerStart>, focus: Res<SimFocus>) {
     let (body, rotation, awaiting) = match start.0 {
         Some(saved) => (saved.body, saved.rotation(), AwaitingSpawn::AsSaved),
         None => {
-            let facing = Transform::default().looking_to(Vec3::new(1.0, 0.0, 1.0), Vec3::Y);
             let body = Body::standing_at(feet_in(focus.0));
-            (body, facing.rotation, AwaitingSpawn::OnGround)
+            (body, spawn_facing(), AwaitingSpawn::OnGround)
         }
     };
     commands.spawn((
@@ -120,9 +128,36 @@ fn world_chunk_layers() -> std::ops::RangeInclusive<i32> {
     WORLD_BOTTOM_Y / size..=WORLD_TOP_Y / size - 1
 }
 
+/// The Chunks of `focus`'s column that [`ground_below`] looks through: render distance above and
+/// below the focus's Chunk, within the world's limits. Lowest first.
+pub fn ground_column(focus: CellPos) -> impl Iterator<Item = ChunkPos> {
+    let centre = ChunkPos::of(focus);
+    let layers = world_chunk_layers();
+    let lowest = (centre.y - RENDER_DISTANCE.vertical).max(*layers.start());
+    let highest = (centre.y + RENDER_DISTANCE.vertical).min(*layers.end());
+    (lowest..=highest).map(move |y| ChunkPos::new(centre.x, y, centre.z))
+}
+
+/// Where a player standing on the ground below `focus` stands: in the Cell just above the highest
+/// solid Cell of `focus`'s column within [`ground_column`], or at `focus` if none of it is solid.
+/// `is_solid` says which Cells are.
+pub fn ground_below(focus: CellPos, is_solid: impl Fn(CellPos) -> bool) -> CellPos {
+    let size = CHUNK_SIZE as i32;
+    let column: Vec<ChunkPos> = ground_column(focus).collect();
+    let (Some(lowest), Some(highest)) = (column.first(), column.last()) else {
+        return focus;
+    };
+    let CellPos { x, z, .. } = focus;
+    (lowest.y * size..(highest.y + 1) * size)
+        .rev()
+        .map(|y| CellPos::new(x, y, z))
+        .find(|&pos| is_solid(pos))
+        .map_or(focus, |pos| CellPos::new(x, pos.y + 1, z))
+}
+
 /// Once every Chunk of the focus's column within render distance is loaded (the origin column,
 /// where a new World's focus starts), stands a new World's player on that column's highest solid
-/// Cell.
+/// Cell, as [`ground_below`] finds it.
 fn place_on_ground(
     mut commands: Commands,
     view: Res<WorldView>,
@@ -134,27 +169,13 @@ fn place_on_ground(
     if *awaiting != AwaitingSpawn::OnGround {
         return;
     }
-    let CellPos { x, z, .. } = focus.0;
-    let centre = ChunkPos::of(focus.0);
-    let size = CHUNK_SIZE as i32;
-    let layers = world_chunk_layers();
-    let lowest = (centre.y - RENDER_DISTANCE.vertical).max(*layers.start());
-    let highest = (centre.y + RENDER_DISTANCE.vertical).min(*layers.end());
-    let loaded = |y: i32| view.chunk(ChunkPos::new(centre.x, y, centre.z)).is_some();
-    if !(lowest..=highest).all(loaded) {
+    if !ground_column(focus.0).all(|chunk| view.chunk(chunk).is_some()) {
         return;
     }
-    let top = (highest + 1) * size;
-    let bottom = lowest * size;
-    let is_solid = |y: i32| {
-        view.cell(CellPos::new(x, y, z))
+    let feet = ground_below(focus.0, |pos| {
+        view.cell(pos)
             .is_some_and(|cell| elements.get(cell.element).phase == Phase::Solid)
-    };
-    // With no solid Cell in the column, it stays at the focus.
-    let feet = (bottom..top)
-        .rev()
-        .find(|&y| is_solid(y))
-        .map_or(focus.0, |y| CellPos::new(x, y + 1, z));
+    });
 
     **player = Body::standing_at(feet_in(feet));
     transform.translation = player.eyes();
@@ -266,6 +287,6 @@ fn focus_on_player(mut focus: ResMut<SimFocus>, player: Single<&Player, Without<
 }
 
 /// Where the feet of a body standing in the Cell at `pos` go: the middle of its floor.
-fn feet_in(pos: CellPos) -> Vec3 {
+pub fn feet_in(pos: CellPos) -> Vec3 {
     IVec3::new(pos.x, pos.y, pos.z).as_vec3() + Vec3::new(0.5, 0.0, 0.5)
 }

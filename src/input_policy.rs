@@ -5,8 +5,9 @@
 //! - **Gameplay**: while the World runs, its window has focus, and Alt isn't held. The cursor is
 //!   captured: hidden, and locked to the window. The mouse looks around, the keys move, and the
 //!   buttons use the god tools. egui's windows let clicks pass through.
-//! - **Esc** pauses the World, and resumes it again (`crate::session::Play`). While paused, the
-//!   cursor is free and nothing reaches the World.
+//! - **Esc** pauses the World, and resumes it again (`crate::session::Play`), but not while the
+//!   player is leaving it and its last save is under way. While paused, the cursor is free and
+//!   nothing reaches the World.
 //! - **Holding Alt** frees the cursor, for the debug panel and the palette. Movement, mouse look
 //!   and the god tools take no input, but physics and the debug clock carry on.
 //! - **Without focus** the cursor stays free, whatever else holds.
