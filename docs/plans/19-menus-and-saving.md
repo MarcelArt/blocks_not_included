@@ -88,6 +88,6 @@ Checked in the real game with a temporary harness, since removed. It saved to a 
 ### Deferred
 
 - **Local time.** Last-played times show as how long ago, or in UTC. Local time needs a time-zone crate.
-- **Settings.** The autosave interval is `AUTOSAVE_INTERVAL` until step 20 wires `Autosave::interval` to the player's choice, and Settings joins both menus.
+- **Settings.** The autosave interval is `AUTOSAVE_INTERVAL` until step 20 wires `Autosave::interval` to the player's choice, and Settings joins both menus. (Done in step 20.)
 - **Focus loss still doesn't pause** (from step 18).
 - **Quitting other ways.** Only the window's close button and Exit save first. A signal such as SIGTERM, or a crash, loses play since the last save. The last committed save stays loadable.

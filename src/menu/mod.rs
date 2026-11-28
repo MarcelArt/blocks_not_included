@@ -1,6 +1,9 @@
-//! The menus: the main menu while no World is open, the pause menu over a paused World, and a
-//! note of each save during play. They draw what `crate::lifecycle` holds, and ask it for
-//! everything through [`MenuAction`]s.
+//! The menus: the main menu while no World is open, the pause menu over a paused World, the
+//! Settings page over either, and a note of each save during play. They draw what
+//! `crate::lifecycle` and `crate::settings` hold, and ask them for everything through
+//! [`MenuAction`]s and [`SettingsAction`]s.
+
+mod settings_page;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +16,7 @@ use crate::lifecycle::{
 };
 use crate::saves::{WorldId, WorldSummary};
 use crate::session::{Play, Session};
+use crate::settings::{SettingsAction, SettingsPage, SettingsStatus};
 
 /// The main menu's background.
 const BACKDROP: Color = Color::srgb(0.06, 0.08, 0.11);
@@ -29,8 +33,8 @@ const SAVED_NOTE: Duration = Duration::from_secs(3);
 /// How long the note of a save that failed stays up.
 const FAILED_NOTE: Duration = Duration::from_secs(10);
 
-/// The main menu, the pause menu and the note of each save. Needs the lifecycle, the session and
-/// `EguiPlugin`.
+/// The main menu, the pause menu, the Settings page and the note of each save. Needs the
+/// lifecycle, the settings, the session and `EguiPlugin`.
 pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
@@ -42,6 +46,7 @@ impl Plugin for MenuPlugin {
                 (
                     draw_main_menu.run_if(in_state(Session::Closed)),
                     (draw_pause_menu, draw_save_note).run_if(in_state(Session::Open)),
+                    settings_page::draw_settings_page,
                 ),
             );
     }
@@ -81,29 +86,38 @@ fn show_home(mut screen: ResMut<MenuScreen>) {
     *screen = MenuScreen::Home;
 }
 
-/// Draws the main menu's page.
+/// Draws the main menu's page, unless the Settings page shows over it.
+#[expect(clippy::too_many_arguments, reason = "a system's parameters")]
 fn draw_main_menu(
     mut contexts: EguiContexts,
     mut screen: ResMut<MenuScreen>,
     menu: Res<MainMenu>,
     library: Res<Library>,
     clock: Res<WallClock>,
+    (page, settings): (Res<SettingsPage>, Res<SettingsStatus>),
     mut actions: MessageWriter<MenuAction>,
+    mut settings_actions: MessageWriter<SettingsAction>,
 ) -> Result {
+    if page.is_open() {
+        return Ok(());
+    }
     let ctx = contexts.ctx_mut()?;
     let mut act = |action| {
         actions.write(action);
     };
     centred_window("main menu", ctx, |ui| match &mut *screen {
-        MenuScreen::Home => {
-            let next = home(ui, &library, &mut act);
-            if let Some(next) = next {
+        MenuScreen::Home => match home(ui, &library, &settings, &mut act) {
+            Some(HomeChoice::Page(next)) => {
                 if matches!(next, MenuScreen::LoadGame { .. }) {
                     act(MenuAction::ListWorlds);
                 }
                 *screen = next;
             }
-        }
+            Some(HomeChoice::Settings) => {
+                settings_actions.write(SettingsAction::Open);
+            }
+            None => {}
+        },
         MenuScreen::NewGame { name, seed, opened } => {
             if new_game(ui, name, seed, opened, &menu, &mut act) {
                 *screen = MenuScreen::Home;
@@ -178,12 +192,20 @@ fn busy_text(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// The first page: New Game, Load Game, Exit. Returns the page to show next, if one was chosen.
+/// Where the first page leads.
+enum HomeChoice {
+    Page(MenuScreen),
+    Settings,
+}
+
+/// The first page: New Game, Load Game, Settings, Exit. Returns where to go next, if the player
+/// chose.
 fn home(
     ui: &mut egui::Ui,
     library: &Library,
+    settings: &SettingsStatus,
     act: &mut impl FnMut(MenuAction),
-) -> Option<MenuScreen> {
+) -> Option<HomeChoice> {
     ui.vertical_centered(|ui| {
         ui.add_space(8.0);
         ui.label(
@@ -197,16 +219,25 @@ fn home(
     if let Err(why) = library.store() {
         error_text(ui, format!("Worlds can't be saved: {why}"));
     }
+    if !settings.load_problems.is_empty() {
+        error_text(
+            ui,
+            "Some settings couldn't be read, so they use their defaults. Settings says which.",
+        );
+    }
     let mut next = None;
     if wide_button(ui, true, "New Game") {
-        next = Some(MenuScreen::NewGame {
+        next = Some(HomeChoice::Page(MenuScreen::NewGame {
             name: String::new(),
             seed: String::new(),
             opened: true,
-        });
+        }));
     }
     if wide_button(ui, true, "Load Game") {
-        next = Some(MenuScreen::LoadGame { renaming: None });
+        next = Some(HomeChoice::Page(MenuScreen::LoadGame { renaming: None }));
+    }
+    if wide_button(ui, true, "Settings") {
+        next = Some(HomeChoice::Settings);
     }
     if wide_button(ui, true, "Exit") {
         act(MenuAction::Exit);
@@ -537,7 +568,8 @@ fn summary_grid(ui: &mut egui::Ui, world: &WorldSummary, now: SystemTime) {
         });
 }
 
-/// The pause menu, over the World while it is paused or being left.
+/// The pause menu, over the World while it is paused or being left, unless the Settings page
+/// shows over it.
 #[expect(clippy::too_many_arguments, reason = "a system's parameters")]
 fn draw_pause_menu(
     mut contexts: EguiContexts,
@@ -545,11 +577,12 @@ fn draw_pause_menu(
     current: Option<Res<CurrentWorld>>,
     saving: Res<Saving>,
     leaving: Res<Leaving>,
-    time: Res<Time<Real>>,
-    clock: Res<WallClock>,
+    (time, clock): (Res<Time<Real>>, Res<WallClock>),
+    page: Res<SettingsPage>,
     mut actions: MessageWriter<MenuAction>,
+    mut settings_actions: MessageWriter<SettingsAction>,
 ) -> Result {
-    if *play.get() == Play::Running {
+    if *play.get() == Play::Running || page.is_open() {
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
@@ -582,6 +615,9 @@ fn draw_pause_menu(
             let can_save = current.is_some() && saving.in_progress().is_none();
             if wide_button(ui, can_save, "Save") {
                 act(MenuAction::Save);
+            }
+            if wide_button(ui, true, "Settings") {
+                settings_actions.write(SettingsAction::Open);
             }
             if wide_button(ui, true, "Return to Main Menu") {
                 act(MenuAction::ReturnToMainMenu);

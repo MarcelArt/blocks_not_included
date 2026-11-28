@@ -32,9 +32,9 @@ mod format;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::hash::{BuildHasher, RandomState};
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -44,6 +44,7 @@ use bevy::math::{EulerRot, Quat};
 use serde::{Deserialize, Serialize};
 use sim::{ElementTable, SimSettings};
 
+use crate::atomic_write::{stage, sync_dir};
 use crate::player::movement::Body;
 use crate::sim_bridge::{Generation, SimCapture};
 use format::Header;
@@ -562,25 +563,6 @@ impl WorldStore {
             }
         }
     }
-}
-
-/// Writes `bytes` to a new file at `path` and flushes it to disk.
-fn stage(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-/// Flushes the folder's list of files to disk, so a rename into it survives a power cut. Only
-/// Unix can open a folder to flush it; Windows' NTFS journals renames itself. Some file systems
-/// can't flush a folder at all, so failing is fine: the rename has happened either way.
-fn sync_dir(dir: &Path) {
-    #[cfg(unix)]
-    if let Ok(dir) = File::open(dir) {
-        let _ = dir.sync_all();
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
 /// `name`, trimmed, if anything is left.

@@ -1,14 +1,17 @@
 //! The god tools. They change the world through Edits, which create and destroy matter by
 //! design.
 //!
-//! Controls: 1–4 choose Dig, Place, Heat brush or Spawn fluid, and the palette in the top-left
-//! corner sets what they put down and how the brush heats. While input is gameplay input
-//! (`crate::input_policy`), with the cursor captured:
+//! Controls, bound in Settings (`crate::settings`): the Choose actions, by default 1–4, choose
+//! Dig, Place, Heat brush or Spawn fluid, and the palette in the top-left corner sets what they
+//! put down and how the brush heats. While input is gameplay input (`crate::input_policy`), with
+//! the cursor captured, each tool's own action uses it:
 //!
-//! - Dig: left click turns the Cell in view into Vacuum.
-//! - Place: right click puts down the palette's Cell against the face in view.
-//! - Heat brush: holding the left button heats, or cools, the Cells around the one in view.
-//! - Spawn fluid: right click puts down the palette's gas or liquid against the face in view.
+//! - Dig, by default left click, turns the Cell in view into Vacuum.
+//! - Place, by default right click, puts down the palette's Cell against the face in view.
+//! - Heat brush, by default the left button held, heats, or cools, the Cells around the one in
+//!   view.
+//! - Spawn fluid, by default right click, puts down the palette's gas or liquid against the face
+//!   in view.
 //!
 //! Holding Alt frees the cursor to use the palette. A click made while it is free never uses a
 //! tool, even once Alt is released with the button still down. While the World is paused, the
@@ -30,10 +33,11 @@ use crate::input_policy::{InputPolicy, gameplay_input};
 use crate::player::raycast::{Hit, REACH, raycast};
 use crate::player::{AwaitingSpawn, Player, PlayerSystems};
 use crate::session::{Play, Session, SessionSystems};
+use crate::settings::{Action, ActionInput, Settings, SettingsPage};
 use crate::sim_bridge::{Elements, SimBridge, SimCommand, SimReport};
 use crate::world::WorldView;
 use brush::{BrushStroke, brush_cells};
-pub use palette::{Palette, Tool, cell_of, full_mass_grams};
+pub use palette::{Palette, Tool, cell_of, full_mass_grams, tool_hint};
 pub use target::{placement_target, stops_sight};
 
 /// How many Ticks the log follows the Cell an Edit changed: 5 s.
@@ -50,6 +54,8 @@ impl Plugin for GodToolsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Aim>()
             .init_resource::<WatchedCell>()
+            .init_resource::<Settings>()
+            .init_resource::<SettingsPage>()
             .add_systems(
                 OnEnter(Session::Open),
                 set_up_tools.in_set(SessionSystems::Build),
@@ -137,11 +143,11 @@ impl Cells<'_> {
     }
 }
 
-/// The mouse buttons, as far as the tools may use them: only while input is gameplay input, and
+/// The tools' actions, as far as the tools may use them: only while input is gameplay input, and
 /// egui doesn't want the pointer.
 #[derive(SystemParam)]
 struct ToolButtons<'w> {
-    mouse: Res<'w, ButtonInput<MouseButton>>,
+    actions: ActionInput<'w>,
     policy: Res<'w, InputPolicy>,
     ui: Res<'w, EguiWantsInput>,
 }
@@ -151,12 +157,12 @@ impl ToolButtons<'_> {
         self.policy.gameplay && !self.ui.wants_any_pointer_input()
     }
 
-    fn just_pressed(&self, button: MouseButton) -> bool {
-        self.usable() && self.mouse.just_pressed(button)
+    fn just_pressed(&self, action: Action) -> bool {
+        self.usable() && self.actions.just_pressed(action)
     }
 
-    fn pressed(&self, button: MouseButton) -> bool {
-        self.usable() && self.mouse.pressed(button)
+    fn pressed(&self, action: Action) -> bool {
+        self.usable() && self.actions.pressed(action)
     }
 }
 
@@ -203,11 +209,11 @@ fn set_up_tools(
     *watched = WatchedCell::default();
 }
 
-/// Number keys 1–4 choose a tool.
-fn choose_tool(keys: Res<ButtonInput<KeyCode>>, mut palette: ResMut<Palette>) {
+/// The Choose actions, by default 1–4, choose a tool.
+fn choose_tool(actions: ActionInput, mut palette: ResMut<Palette>) {
     if let Some(tool) = Tool::ALL
         .into_iter()
-        .find(|tool| keys.just_pressed(tool.key()))
+        .find(|tool| actions.just_pressed(Action::choose(*tool)))
     {
         palette.tool = tool;
     }
@@ -225,8 +231,8 @@ fn aim(
     aim.set_if_neq(Aim(hit));
 }
 
-/// Uses the tool in hand, as the mouse buttons say. A heat brush stroke ends as soon as the
-/// button is up, or the tools can't use it, before it heats any more.
+/// Uses the tool in hand, as its action says. A heat brush stroke ends as soon as its input is
+/// up, or the tools can't use it, before it heats any more.
 fn use_tool(
     buttons: ToolButtons,
     time: Res<Time>,
@@ -236,12 +242,12 @@ fn use_tool(
     mut editor: Editor,
     mut stroke: Local<BrushStroke>,
 ) {
-    if palette.tool != Tool::HeatBrush || !buttons.pressed(MouseButton::Left) {
+    if palette.tool != Tool::HeatBrush || !buttons.pressed(Action::HeatBrush) {
         stroke.end();
     }
     match palette.tool {
         Tool::Dig => {
-            if buttons.just_pressed(MouseButton::Left)
+            if buttons.just_pressed(Action::Dig)
                 && let Some(hit) = **aim
                 && let Some(old) = cells.get(hit.cell)
             {
@@ -252,7 +258,7 @@ fn use_tool(
             }
         }
         Tool::Place | Tool::SpawnFluid => {
-            if buttons.just_pressed(MouseButton::Right)
+            if buttons.just_pressed(Action::use_tool(palette.tool))
                 && let Some(target) = aim.and_then(|hit| cells.placement_target(hit))
             {
                 let (verb, cell) = match palette.tool {
@@ -266,7 +272,7 @@ fn use_tool(
             }
         }
         Tool::HeatBrush => {
-            if buttons.just_pressed(MouseButton::Left) {
+            if buttons.just_pressed(Action::HeatBrush) {
                 stroke.start();
             }
             if let Some(seconds) = stroke.hold(time.delta_secs())

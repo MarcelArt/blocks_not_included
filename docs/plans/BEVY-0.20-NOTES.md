@@ -141,6 +141,20 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **Agent checks of egui menus in a real window.** bevy_egui reads the pointer from `WindowEvent` messages, so a harness can click: write `WindowEvent::CursorMoved(CursorMoved { window, position, delta: None })`, then `WindowEvent::MouseButtonInput` pressed and released, in logical pixels. Typing is `KeyboardInput` with `logical_key: Key::Character(…)`; a space must be `Key::Space`.
 - **Math.** `Quat::angle_between` can't tell rotations less than about 7e-4 rad apart from equal in `f32`: its `acos` of a dot product near 1 loses precision.
 
+## Found in step 20
+
+- **Serializing input.** `KeyCode` and `MouseButton` implement serde only with Bevy's `serialize` feature, which the workspace now enables. They serialize as their variant names: `KeyW`, `Left`, `Other(9)`.
+- **Window size and mode.**
+  - `WindowResolution::new(w, h)` and `set_physical_resolution(w, h)` take physical pixels; `set(w, h)` takes logical ones.
+  - When it creates the window, bevy_winit reads the resolution's size as logical and scales it by the screen's factor (`set_scale_factor_and_apply_to_physical_size`). On a scaled screen, the window opens larger than the physical size asked for.
+  - `WindowMode::BorderlessFullscreen(MonitorSelection::Current)`. While fullscreen, `Window::resolution` reports the screen's size.
+  - Leaving fullscreen on KDE Wayland, the compositor restores the size from before after a resize asked for in the same frame. Ask again once the window reports the restored size.
+  - Monitors are entities: `Query<&Monitor, With<PrimaryMonitor>>`, with `physical_width` and `physical_height`.
+- **Using up input.** `ButtonInput::get_just_pressed()` lists the frame's presses, and `clear_just_pressed` hides one from later systems. A system ordered `.after(InputSystems).before(InputPolicySystems)` sees every press first.
+- **egui modals and the mouse.** egui hit-tests a press against the previous frame's layout. A press that closes a modal in `PreUpdate` therefore still lands on the modal, and its release clicks nothing under it. Checked in the real window: a click over a button behind a listening prompt didn't press it.
+- **egui 0.36.** `egui::ComboBox::from_id_salt(id).selected_text(…).width(w).show_ui(ui, …)`; `Slider::logarithmic(true)`; `Button::selected(bool)` highlights a button; `ui.visuals().warn_fg_color`.
+- **RON** (0.12). `ron::value::RawValue` defers parsing one value: deserialize `Option<Box<RawValue>>`, then `raw.into_rust::<T>()`. A plain `Option<T>` field expects `Some(…)` in the text, so parse with `ron::Options::default().with_default_extension(Extensions::IMPLICIT_SOME)`. `PrettyConfig::new().depth_limit(2)` keeps each binding on one line.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

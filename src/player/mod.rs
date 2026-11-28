@@ -1,10 +1,12 @@
 //! The player: a body that walks, jumps, flies and swims through the world in first person, and
 //! that the Active Region follows. It exists while a World is open.
 //!
-//! Controls, while input is gameplay input (`crate::input_policy`): the mouse looks around. WASD
-//! moves, Space jumps, and F switches flying on and off. Flying goes through solids; Space rises
-//! and Shift sinks. In a liquid, holding Space swims upward. While Alt is held, the body takes no
-//! input but still falls, swims and slides; while the World is paused, it doesn't move at all.
+//! Controls, while input is gameplay input (`crate::input_policy`): the mouse looks around, as
+//! fast as the player's mouse sensitivity says. The movement actions move, Jump jumps, and F
+//! switches flying on and off. Flying goes through solids; Jump rises and Fly down sinks. In a
+//! liquid, holding Jump swims upward. The actions are bound in Settings (`crate::settings`), by
+//! default to WASD, Space and Shift. While Alt is held, the body takes no input but still falls,
+//! swims and slides; while the World is paused, it doesn't move at all.
 //!
 //! A World opened without a player spawns them on the ground below the focus ([`ground_below`]).
 //! A saved World's player carries on exactly as saved: where they were, looking the same way,
@@ -25,12 +27,18 @@ use sim::{CHUNK_SIZE, CellPos, ChunkPos, Phase, WORLD_BOTTOM_Y, WORLD_TOP_Y};
 
 use crate::input_policy::{InputPolicy, gameplay_input};
 use crate::session::{Play, PlayerStart, Session, SessionSystems};
+use crate::settings::{Action, ActionInput, Settings};
 use crate::sim_bridge::{Elements, RENDER_DISTANCE, SimFocus};
 use crate::world::WorldView;
 use movement::{Body, MoveInput, MoveMode, advance};
 
-/// How far the view turns per pixel the mouse moves, in radians: about a tenth of a degree.
-const MOUSE_SENSITIVITY: f32 = 0.002;
+/// How far the view turns per pixel the mouse moves at a mouse sensitivity of 1, in radians: about
+/// a tenth of a degree.
+pub const LOOK_SPEED: f32 = 0.002;
+
+/// Switches flying on and off. Fixed until step 21 moves flying to a double press of Jump: Settings
+/// can't rebind it, or bind anything else to it (`crate::settings::FIXED_SHORTCUTS`).
+pub const FLY_KEY: KeyCode = KeyCode::KeyF;
 
 /// How far the view may tilt up or down: just short of straight up and down, where yaw would
 /// become ambiguous.
@@ -49,7 +57,7 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<Settings>().add_systems(
             OnEnter(Session::Open),
             spawn_player.in_set(SessionSystems::Build),
         )
@@ -214,28 +222,31 @@ fn release_saved_player(
     }
 }
 
-/// Turns the view with the mouse. A player held while Chunks load keeps looking the way they
-/// spawned.
+/// Turns the view with the mouse, as fast as the player's mouse sensitivity says. A player held
+/// while Chunks load keeps looking the way they spawned.
 fn look_around(
     motion: Res<AccumulatedMouseMotion>,
+    settings: Res<Settings>,
     mut player: Single<&mut Transform, (With<Player>, Without<AwaitingSpawn>)>,
 ) {
     if motion.delta == Vec2::ZERO {
         return;
     }
     // The mouse reports the whole movement since the last frame, so it isn't scaled by time.
+    let turn = motion.delta * LOOK_SPEED * settings.mouse_sensitivity;
     let (yaw, pitch, _) = player.rotation.to_euler(EulerRot::YXZ);
-    let yaw = yaw - motion.delta.x * MOUSE_SENSITIVITY;
-    let pitch = (pitch - motion.delta.y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    let yaw = yaw - turn.x;
+    let pitch = (pitch - turn.y).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     player.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
 }
 
-/// Moves the body as the keys say, through the world as the game last heard it from the
+/// Moves the body as the controls say, through the world as the game last heard it from the
 /// simulation, and keeps the camera at its eyes. Without gameplay input, the body moves as if no
-/// key were held.
+/// control were held.
 fn move_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    actions: ActionInput,
     policy: Res<InputPolicy>,
     view: Res<WorldView>,
     elements: Res<Elements>,
@@ -243,12 +254,12 @@ fn move_player(
 ) {
     let (mut player, mut transform) = player.into_inner();
     let input = if policy.gameplay {
-        if keys.just_pressed(KeyCode::KeyF) {
+        if keys.just_pressed(FLY_KEY) {
             player.mode = player.mode.toggled();
             player.velocity = Vec3::ZERO;
             info!("flying: {}", player.mode == MoveMode::Fly);
         }
-        move_input(&keys, &transform)
+        move_input(&actions, &transform)
     } else {
         MoveInput::default()
     };
@@ -263,20 +274,20 @@ fn move_player(
     transform.translation = player.eyes();
 }
 
-/// What the keys held ask of the body, which faces as `transform` does.
-fn move_input(keys: &ButtonInput<KeyCode>, transform: &Transform) -> MoveInput {
-    let axis = |positive: KeyCode, negative: KeyCode| {
-        f32::from(i8::from(keys.pressed(positive)) - i8::from(keys.pressed(negative)))
+/// What the controls held ask of the body, which faces as `transform` does.
+fn move_input(actions: &ActionInput, transform: &Transform) -> MoveInput {
+    let axis = |positive: Action, negative: Action| {
+        f32::from(i8::from(actions.pressed(positive)) - i8::from(actions.pressed(negative)))
     };
     // Level, whichever way the view tilts.
     let forward = transform.forward().with_y(0.0).normalize_or_zero();
     let right = transform.right().with_y(0.0).normalize_or_zero();
-    let direction =
-        forward * axis(KeyCode::KeyW, KeyCode::KeyS) + right * axis(KeyCode::KeyD, KeyCode::KeyA);
+    let direction = forward * axis(Action::MoveForward, Action::MoveBack)
+        + right * axis(Action::MoveRight, Action::MoveLeft);
     MoveInput {
         direction: direction.normalize_or_zero(),
-        up: keys.pressed(KeyCode::Space),
-        down: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+        up: actions.pressed(Action::Jump),
+        down: actions.pressed(Action::Descend),
     }
 }
 

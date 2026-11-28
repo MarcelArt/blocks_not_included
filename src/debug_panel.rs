@@ -17,9 +17,13 @@ use crate::session::{Play, Session, SessionSystems};
 use crate::sim_bridge::{SimBridge, SimCommand, SimReport, TickRate};
 use crate::sim_files::{FileStatus, SimFileStatus};
 
-const TOGGLE_KEY: KeyCode = KeyCode::F3;
-const PAUSE_KEY: KeyCode = KeyCode::KeyP;
-const STEP_KEY: KeyCode = KeyCode::KeyN;
+/// Shows and hides the panel. Like the clock's keys, it is fixed: Settings can't rebind it, or
+/// bind anything else to it (`crate::settings::FIXED_SHORTCUTS`).
+pub const PANEL_KEY: KeyCode = KeyCode::F3;
+/// Stops the simulation's clock, and starts it again.
+pub const CLOCK_KEY: KeyCode = KeyCode::KeyP;
+/// Runs one Tick while the clock is stopped.
+pub const STEP_KEY: KeyCode = KeyCode::KeyN;
 
 /// How wide the panel's text runs before it wraps, in points, so a long error message doesn't
 /// stretch the panel across the screen.
@@ -115,14 +119,14 @@ impl Clock<'_> {
 }
 
 fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, mut panel: ResMut<DebugPanel>) {
-    if keys.just_pressed(TOGGLE_KEY) {
+    if keys.just_pressed(PANEL_KEY) {
         panel.shown = !panel.shown;
     }
 }
 
 /// P stops or starts the clock; N runs one Tick while it is stopped.
 fn use_clock_keys(keys: Res<ButtonInput<KeyCode>>, mut clock: Clock) {
-    if keys.just_pressed(PAUSE_KEY) {
+    if keys.just_pressed(CLOCK_KEY) {
         clock.apply(if clock.paused() {
             ClockAction::Resume
         } else {

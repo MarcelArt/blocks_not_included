@@ -7,6 +7,7 @@
 //! a thread of its own, so these tests wait in real time, with generous timeouts. The app's own
 //! clock only moves when a test steps it, so play time is counted exactly.
 
+use std::f32::consts::TAU;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,11 +17,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, process};
 
 use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+use bevy::input::mouse::MouseMotion;
 use bevy::input::{ButtonState, InputPlugin};
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
-use bevy::window::{CursorOptions, PrimaryWindow, WindowCloseRequested};
+use bevy::window::{
+    CursorOptions, MonitorSelection, PrimaryWindow, WindowCloseRequested, WindowMode,
+};
 use bevy_egui::input::EguiWantsInput;
 use blocks_not_included::input_policy::{InputPolicy, InputPolicyPlugin};
 use blocks_not_included::lifecycle::{
@@ -31,6 +35,10 @@ use blocks_not_included::player::movement::Body;
 use blocks_not_included::player::{AwaitingSpawn, Player, PlayerPlugin};
 use blocks_not_included::saves::{RulesPolicy, WorldId, WorldStore, WorldSummary};
 use blocks_not_included::session::{Play, Session, SessionPlugin};
+use blocks_not_included::settings::{
+    Action, AutosaveInterval, DisplayMode, Input, Rebinding, Settings, SettingsAction,
+    SettingsPage, SettingsPlugin, SettingsStatus, SettingsStorage, SettingsStore, WindowSize,
+};
 use blocks_not_included::sim_bridge::{
     Elements, SimBridge, SimBridgePlugin, SimCommand, SimReport,
 };
@@ -123,22 +131,34 @@ impl Wall {
 #[derive(Resource)]
 struct TestWindow(Entity);
 
-/// A headless app with the session, the input policy, the sim bridge, the player and the
-/// lifecycle, saving Worlds in `dir`, with a wall clock and an app clock the test moves.
+/// Where a test's app keeps the player's settings: beside its saves.
+fn settings_store(dir: &Path) -> SettingsStore {
+    SettingsStore::new(dir.join("settings"))
+}
+
+/// A headless app with the session, the settings, the input policy, the sim bridge, the player
+/// and the lifecycle, saving Worlds in `dir` and settings in [`settings_store`], with a wall clock
+/// and an app clock the test moves. It starts with the settings kept there, as the game does.
 fn lifecycle_app(dir: &Path, writes: &Writes, wall: &Wall) -> App {
+    let store = settings_store(dir);
+    let loaded = store.load();
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, StatesPlugin, InputPlugin))
         // egui itself needs a renderer. Nothing here is drawn, so egui never wants input.
         .init_resource::<EguiWantsInput>()
         .add_plugins((
             SessionPlugin,
+            SettingsPlugin,
             InputPolicyPlugin,
             SimBridgePlugin,
             PlayerPlugin,
             LifecyclePlugin,
         ))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
-        .insert_resource(Library::new(writes.store(dir), ASSETS));
+        .insert_resource(Library::new(writes.store(dir), ASSETS))
+        .insert_resource(loaded.settings)
+        .insert_resource(SettingsStatus::after_loading(loaded.problems))
+        .insert_resource(SettingsStorage::new(store));
     let wall = wall.clone();
     app.insert_resource(WallClock::new(move || {
         Wall::at(wall.0.load(Ordering::SeqCst))
@@ -181,18 +201,23 @@ fn update_until(app: &mut App, what: &str, mut done: impl FnMut(&mut App) -> boo
 
 /// Presses and releases `key_code` over two frames.
 fn tap(app: &mut App, key_code: KeyCode) {
-    let window = app.world().resource::<TestWindow>().0;
     for state in [ButtonState::Pressed, ButtonState::Released] {
-        app.world_mut().write_message(KeyboardInput {
-            key_code,
-            logical_key: Key::Unidentified(NativeKey::Unidentified),
-            state,
-            text: None,
-            repeat: false,
-            window,
-        });
+        key(app, key_code, state);
         app.update();
     }
+}
+
+/// Presses or releases `key_code`, in time for the next frame.
+fn key(app: &mut App, key_code: KeyCode, state: ButtonState) {
+    let window = app.world().resource::<TestWindow>().0;
+    app.world_mut().write_message(KeyboardInput {
+        key_code,
+        logical_key: Key::Unidentified(NativeKey::Unidentified),
+        state,
+        text: None,
+        repeat: false,
+        window,
+    });
 }
 
 /// Presses the window's close button.
@@ -366,6 +391,63 @@ fn granite_at(app: &App, pos: CellPos) -> Option<bool> {
     Some(cell.element == granite)
 }
 
+/// Sends `action`, as the Settings page does, and runs a frame.
+fn settings_act(app: &mut App, action: SettingsAction) {
+    app.world_mut().write_message(action);
+    app.update();
+}
+
+/// The Settings page's editor, while it is open.
+fn settings_page(app: &mut App) -> Option<Mut<'_, blocks_not_included::settings::SettingsEditor>> {
+    let page = app.world_mut().resource_mut::<SettingsPage>();
+    if page.is_open() {
+        Some(page.map_unchanged(|page| page.editor_mut().expect("open")))
+    } else {
+        None
+    }
+}
+
+/// Changes the settings as a player does: pauses, opens the Settings page, changes the draft,
+/// applies it, goes back to the pause menu with Esc, and resumes with Esc.
+fn change_settings(app: &mut App, change: impl FnOnce(&mut Settings)) {
+    pause(app);
+    settings_act(app, SettingsAction::Open);
+    change(&mut settings_page(app).expect("the page opens").draft);
+    settings_act(app, SettingsAction::Apply);
+    assert_eq!(
+        app.world().resource::<SettingsStatus>().applied,
+        Some(Ok(())),
+        "the settings are kept"
+    );
+    tap(app, KeyCode::Escape);
+    assert!(settings_page(app).is_none(), "Esc goes back");
+    assert_eq!(play(app), Some(Play::Paused));
+    tap(app, KeyCode::Escape);
+    assert_eq!(play(app), Some(Play::Running));
+}
+
+/// The keys that systems in `Update` saw pressed.
+#[derive(Resource, Default)]
+struct SeenKeys(Vec<KeyCode>);
+
+fn record_keys(keys: Res<ButtonInput<KeyCode>>, mut seen: ResMut<SeenKeys>) {
+    seen.0.extend(keys.get_just_pressed());
+}
+
+/// Resizes the test window, as the window system does.
+fn set_window_size(app: &mut App, width: u32, height: u32) {
+    let entity = app.world().resource::<TestWindow>().0;
+    let mut window = app.world_mut().get_mut::<Window>(entity).expect("the window");
+    window.resolution.set_physical_resolution(width, height);
+}
+
+/// The test window's mode and size in physical pixels.
+fn window(app: &App) -> (WindowMode, UVec2) {
+    let entity = app.world().resource::<TestWindow>().0;
+    let window = app.world().get::<Window>(entity).expect("the window");
+    (window.mode, window.resolution.physical_size())
+}
+
 // --- Tests ---
 
 #[test]
@@ -511,11 +593,7 @@ fn autosaves_count_unpaused_play_from_the_last_save() {
     let mut app = lifecycle_app(&dir.0, &writes, &wall);
     let world = new_game(&mut app, "Clockwork", Some(7));
     let interval = autosave(&app).interval;
-    assert_eq!(
-        interval,
-        Duration::from_secs(60),
-        "until step 20's settings"
-    );
+    assert_eq!(interval, Duration::from_secs(60), "the default: a minute");
     let writes_at_start = writes.attempts();
 
     step(&mut app, Duration::from_secs(30));
@@ -633,6 +711,170 @@ fn a_failed_autosave_keeps_the_last_save_and_waits_an_interval_to_try_again() {
     ));
     assert_ne!(fs::read(&path).expect("the save"), committed);
     store(&app).load(&world.id).expect("the new save loads");
+}
+
+/// Step 20, seam 3: each autosave interval the player can choose in Settings is counted in
+/// unpaused play, as step 19's single interval was. The interval kept from the last run applies
+/// from the start.
+#[test]
+fn each_autosave_interval_chosen_in_settings_counts_unpaused_play() {
+    let dir = TempDir::new("autosave-intervals");
+    let (writes, wall) = (Writes::default(), Wall::default());
+    let kept = Settings {
+        autosave: AutosaveInterval::ThreeMinutes,
+        ..Settings::default()
+    };
+    settings_store(&dir.0).save(&kept).expect("kept");
+    let mut app = lifecycle_app(&dir.0, &writes, &wall);
+    assert_eq!(autosave(&app).interval, Duration::from_secs(3 * 60));
+
+    new_game(&mut app, "Metronome", Some(3));
+    for interval in AutosaveInterval::ALL {
+        change_settings(&mut app, |draft| draft.autosave = interval);
+        assert_eq!(autosave(&app).interval, interval.duration());
+        // The World has saved, or just opened, and stood paused since.
+        assert_eq!(autosave(&app).since_save, Duration::ZERO);
+        let attempts = writes.attempts();
+
+        step(&mut app, interval.duration() - Duration::from_secs(1));
+        assert_eq!(saving(&app).in_progress(), None, "{interval:?}");
+        step(&mut app, Duration::from_secs(1));
+        assert_eq!(
+            saving(&app).in_progress(),
+            Some(SaveReason::Autosave),
+            "{interval:?}"
+        );
+        assert!(matches!(
+            save_ended(&mut app),
+            SaveStatus::Saved {
+                reason: SaveReason::Autosave,
+                ..
+            }
+        ));
+        assert_eq!(writes.attempts(), attempts + 1);
+        assert_eq!(autosave(&app).since_save, Duration::ZERO);
+    }
+    assert_eq!(
+        settings_store(&dir.0).load().settings.autosave,
+        AutosaveInterval::TenMinutes,
+        "the last choice is kept"
+    );
+}
+
+/// Step 20: the Settings page over the pause menu. It opens only while the World is paused, and
+/// the World stays paused while it is open. Esc stops listening for a control, then goes back to
+/// the pause menu without resuming. The keys pressed to bind controls reach nothing else. What
+/// the page applies takes effect at once, and is kept.
+#[test]
+fn settings_over_the_pause_menu_keep_the_world_paused_and_apply_at_once() {
+    let dir = TempDir::new("settings-page");
+    let (writes, wall) = (Writes::default(), Wall::default());
+    let mut app = lifecycle_app(&dir.0, &writes, &wall);
+    app.init_resource::<SeenKeys>()
+        .add_systems(Update, record_keys);
+    new_game(&mut app, "Dials", Some(5));
+    for _ in 0..40 {
+        step(&mut app, Duration::from_millis(50));
+    }
+    assert!(player(&mut app).expect("the player").0.grounded);
+
+    // Not while the World runs.
+    settings_act(&mut app, SettingsAction::Open);
+    assert!(settings_page(&mut app).is_none());
+
+    pause(&mut app);
+    settings_act(&mut app, SettingsAction::Open);
+    assert!(settings_page(&mut app).is_some());
+    let frozen = tick(&app);
+
+    // Jump goes to J. The press binds it and is used up.
+    settings_page(&mut app).expect("open").listen(Action::Jump);
+    app.world_mut().resource_mut::<SeenKeys>().0.clear();
+    tap(&mut app, KeyCode::KeyJ);
+    let editor = settings_page(&mut app).expect("open");
+    assert_eq!(editor.draft.bindings.inputs(Action::Jump), [Input::Key(KeyCode::KeyJ)]);
+    assert_eq!(*editor.rebinding(), Rebinding::Idle);
+
+    // Esc while listening only stops listening.
+    settings_page(&mut app).expect("open").listen(Action::Dig);
+    tap(&mut app, KeyCode::Escape);
+    let editor = settings_page(&mut app).expect("still open");
+    assert_eq!(*editor.rebinding(), Rebinding::Idle);
+    assert_eq!(play(&app), Some(Play::Paused));
+    assert_eq!(app.world().resource::<SeenKeys>().0, [], "J and Esc reached nothing else");
+
+    // Borderless fullscreen applies to the window at once, and Jump and the sensitivity with it.
+    let mut editor = settings_page(&mut app).expect("open");
+    editor.draft.display.mode = DisplayMode::BorderlessFullscreen;
+    editor.draft.mouse_sensitivity = 2.0;
+    settings_act(&mut app, SettingsAction::Apply);
+    app.update();
+    assert_eq!(
+        window(&app).0,
+        WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+    );
+    let applied = app.world().resource::<Settings>().clone();
+    assert_eq!(applied.bindings.inputs(Action::Jump), [Input::Key(KeyCode::KeyJ)]);
+
+    // Back to a window, at the size chosen.
+    settings_page(&mut app).expect("open").draft.display = blocks_not_included::settings::Display {
+        mode: DisplayMode::Windowed,
+        window_size: WindowSize::new(1600, 900),
+    };
+    settings_act(&mut app, SettingsAction::Apply);
+    app.update();
+    assert_eq!(window(&app), (WindowMode::Windowed, UVec2::new(1600, 900)));
+    // Leaving fullscreen, a window manager may restore the size from before after the game asked
+    // for its own. The game asks again.
+    set_window_size(&mut app, 1280, 720);
+    app.update();
+    assert_eq!(window(&app).1, UVec2::new(1600, 900));
+    // Once the window has settled, the player may resize it.
+    step(&mut app, Duration::from_secs(2));
+    set_window_size(&mut app, 1000, 700);
+    app.update();
+    assert_eq!(window(&app).1, UVec2::new(1000, 700));
+    let applied = app.world().resource::<Settings>().clone();
+    assert_eq!(
+        settings_store(&dir.0).load().settings,
+        applied,
+        "what applies is kept"
+    );
+
+    // Esc goes back to the pause menu, and the World stays paused.
+    tap(&mut app, KeyCode::Escape);
+    assert!(settings_page(&mut app).is_none());
+    assert_eq!(play(&app), Some(Play::Paused));
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(600) {
+        app.update();
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(tick(&app), frozen, "no Tick ran while Settings was open");
+    tap(&mut app, KeyCode::Escape);
+    assert_eq!(play(&app), Some(Play::Running));
+
+    // Space no longer jumps; J does.
+    key(&mut app, KeyCode::Space, ButtonState::Pressed);
+    step(&mut app, Duration::from_millis(50));
+    assert!(player(&mut app).expect("the player").0.velocity.y <= 0.0);
+    key(&mut app, KeyCode::Space, ButtonState::Released);
+    key(&mut app, KeyCode::KeyJ, ButtonState::Pressed);
+    step(&mut app, Duration::from_millis(50));
+    // It leaves at 8 m/s, less 25 m/s² × 0.05 s of gravity: 6.75 m/s.
+    let velocity = player(&mut app).expect("the player").0.velocity.y;
+    assert!((velocity - 6.75).abs() < 1e-3, "{velocity}");
+
+    // The mouse turns the view twice as fast as before.
+    let yaw = |app: &mut App| player(app).expect("the player").1.to_euler(EulerRot::YXZ).0;
+    let before = yaw(&mut app);
+    app.world_mut().write_message(MouseMotion {
+        delta: Vec2::new(-100.0, 0.0),
+    });
+    app.update();
+    // 100 px × 0.002 rad/px × 2 = 0.4 rad, to the left.
+    let turned = (yaw(&mut app) - before).rem_euclid(TAU);
+    assert!((turned - 0.4).abs() < 1e-4, "{turned}");
 }
 
 /// Seam 3: loads, renames and deletes that fail leave the player at the list, with the World

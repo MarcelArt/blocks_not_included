@@ -21,14 +21,13 @@ use super::{CurrentWorld, Leaving, Library, WallClock, go};
 use crate::player::Player;
 use crate::saves::{PlayerState, SaveTicket, StoreError, WorldSave, WorldSummary};
 use crate::session::Play;
+use crate::settings::{AutosaveInterval, Settings};
 use crate::sim_bridge::{SimBridge, SimCapture};
-
-/// How much unpaused play passes between autosaves until the player chooses (step 20).
-pub const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// When the open World saves by itself: once it has run for `interval` since it last saved.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Autosave {
+    /// The player's choice in Settings ([`Settings::autosave`]).
     pub interval: Duration,
     /// Unpaused play since the World last saved, or since the latest autosave was tried. Time
     /// while the World is paused doesn't count.
@@ -38,7 +37,7 @@ pub struct Autosave {
 impl Default for Autosave {
     fn default() -> Self {
         Self {
-            interval: AUTOSAVE_INTERVAL,
+            interval: AutosaveInterval::default().duration(),
             since_save: Duration::ZERO,
         }
     }
@@ -160,6 +159,15 @@ enum Stage {
     },
     /// Encoding and writing on another thread.
     Writing(Task<Result<WorldSummary, StoreError>>),
+}
+
+/// Takes up the autosave interval the player chose. Play counted already still counts: a shorter
+/// interval that has passed already autosaves at once.
+pub(super) fn follow_autosave_setting(settings: Res<Settings>, mut autosave: ResMut<Autosave>) {
+    let interval = settings.autosave.duration();
+    if autosave.interval != interval {
+        autosave.interval = interval;
+    }
 }
 
 /// Counts unpaused play, and asks for an autosave once it is due and no other save is under way.

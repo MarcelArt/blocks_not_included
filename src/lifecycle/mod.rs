@@ -49,9 +49,10 @@ use bevy::window::WindowCloseRequested;
 use crate::input_policy::InputPolicySystems;
 use crate::saves::{StoreError, WorldEntry, WorldId, WorldStore, WorldSummary, random_u64};
 use crate::session::{CloseWorld, OpenWorld, PauseControl, Play, Session, WorldStart};
+use crate::settings::Settings;
 use crate::sim_bridge::SendFocus;
 use crate::sim_files::read_rules;
-pub use saving::{AUTOSAVE_INTERVAL, Autosave, SaveReason, SaveStatus, Saving};
+pub use saving::{Autosave, SaveReason, SaveStatus, Saving};
 
 /// Where Worlds are saved, and where a new World's rules come from.
 #[derive(Resource, Clone)]
@@ -272,6 +273,7 @@ impl Plugin for LifecyclePlugin {
             .init_resource::<Saving>()
             .init_resource::<Autosave>()
             .init_resource::<Leaving>()
+            .init_resource::<Settings>()
             .add_systems(Startup, report_library)
             .add_systems(OnEnter(Session::Closed), list_worlds)
             .add_systems(OnExit(Session::Open), forget_world)
@@ -283,8 +285,12 @@ impl Plugin for LifecyclePlugin {
             )
             .add_systems(
                 Update,
-                saving::count_play_time
-                    .run_if(in_state(Play::Running).and_then(resource_exists::<CurrentWorld>)),
+                (
+                    saving::follow_autosave_setting.run_if(resource_changed::<Settings>),
+                    saving::count_play_time
+                        .run_if(in_state(Play::Running).and_then(resource_exists::<CurrentWorld>)),
+                )
+                    .chain(),
             )
             .add_systems(
                 PostUpdate,

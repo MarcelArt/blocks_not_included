@@ -1,4 +1,4 @@
-//! Where the game keeps each player's own files: World saves, and from step 20 their settings.
+//! Where the game keeps each player's own files: World saves, and their settings.
 //!
 //! - **Linux**, and any other system but Windows: saves under `$XDG_DATA_HOME`, by default
 //!   `~/.local/share`, and settings under `$XDG_CONFIG_HOME`, by default `~/.config`, as the

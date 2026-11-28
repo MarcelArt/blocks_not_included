@@ -13,7 +13,8 @@ default = ["dev"]
 dev = ["bevy/file_watcher"]
 
 [dependencies]
-bevy = { version = "0.20.1", features = ["dynamic_linking"] }
+# `serialize`: the player's settings (`src/settings/`) store key and mouse button bindings by name.
+bevy = { version = "0.20.1", features = ["dynamic_linking", "serialize"] }
 # The god tools' palette. Only what drawing it needs: no clipboard, URL opening, bevy_ui ordering
 # or picking.
 bevy_egui = { version = "0.43.1", default-features = false, features = ["render", "default_fonts"] }

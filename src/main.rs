@@ -10,20 +10,26 @@ use blocks_not_included::readout::ReadoutPlugin;
 use blocks_not_included::render::{ChunkMeshPlugin, ScenePlugin};
 use blocks_not_included::saves::{RulesPolicy, WorldStore};
 use blocks_not_included::session::SessionPlugin;
+use blocks_not_included::settings::{SettingsPlugin, SettingsStatus, SettingsStorage};
 use blocks_not_included::sim_bridge::SimBridgePlugin;
 use blocks_not_included::sim_files::{SimFilesPlugin, assets_folder, read_rules};
 use blocks_not_included::tools::GodToolsPlugin;
 use blocks_not_included::user_dirs::{Build, UserDirs};
 
 fn main() {
+    // Read before the window opens, so it opens as the player set it.
+    let storage = SettingsStorage::for_this_build();
+    let loaded = storage.load();
     App::new()
         .add_plugins((
             DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(loaded.settings.display.primary_window()),
                 // The lifecycle saves the open World before the window closes.
                 close_when_requested: false,
                 ..default()
             }),
             SessionPlugin,
+            SettingsPlugin,
             InputPolicyPlugin,
             SimBridgePlugin,
             SimFilesPlugin,
@@ -47,6 +53,9 @@ fn main() {
             ..default()
         })
         .insert_resource(library())
+        .insert_resource(loaded.settings)
+        .insert_resource(SettingsStatus::after_loading(loaded.problems))
+        .insert_resource(storage)
         .run();
 }
 

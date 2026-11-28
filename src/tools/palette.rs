@@ -9,6 +9,7 @@ use sim::{Cell, Element, ElementId, ElementTable, Phase};
 
 use crate::input_policy::InputPolicy;
 use crate::session::Play;
+use crate::settings::{Action, Bindings, Settings, SettingsPage};
 use crate::sim_bridge::Elements;
 
 /// The temperature the palette starts at, in kelvin: 20 °C.
@@ -38,7 +39,7 @@ const BRUSH_RADIUS_RANGE: RangeInclusive<f32> = 0.0..=5.0;
 /// The heat brush's strength range, in kelvin per second. Below 0 it cools.
 const BRUSH_STRENGTH_RANGE: RangeInclusive<f32> = -1_000.0..=1_000.0;
 
-/// A god tool. Number keys 1–4 choose one, in this order.
+/// A god tool. The Choose actions, by default number keys 1–4, choose one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Tool {
     /// Left click turns the Cell in view into Vacuum.
@@ -54,16 +55,6 @@ pub enum Tool {
 
 impl Tool {
     pub const ALL: [Tool; 4] = [Tool::Dig, Tool::Place, Tool::HeatBrush, Tool::SpawnFluid];
-
-    /// The number key that chooses this tool.
-    pub fn key(self) -> KeyCode {
-        match self {
-            Tool::Dig => KeyCode::Digit1,
-            Tool::Place => KeyCode::Digit2,
-            Tool::HeatBrush => KeyCode::Digit3,
-            Tool::SpawnFluid => KeyCode::Digit4,
-        }
-    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -186,9 +177,11 @@ pub(super) fn draw_palette(
     mut contexts: EguiContexts,
     mut palette: ResMut<Palette>,
     elements: Res<Elements>,
+    (settings, page): (Res<Settings>, Res<SettingsPage>),
     policy: Res<InputPolicy>,
     play: Res<State<Play>>,
 ) -> Result {
+    let bindings = &settings.bindings;
     let captured = policy.gameplay;
     // Only mark the palette changed when a widget changes it.
     let mut edited = palette.clone();
@@ -199,22 +192,15 @@ pub(super) fn draw_palette(
         .interactable(!captured)
         .show(contexts.ctx_mut()?, |ui| {
             ui.horizontal(|ui| {
-                for (number, tool) in (1..).zip(Tool::ALL) {
-                    ui.selectable_value(
-                        &mut edited.tool,
-                        tool,
-                        format!("{number} {}", tool.name()),
-                    );
+                for tool in Tool::ALL {
+                    ui.selectable_value(&mut edited.tool, tool, tool_button(tool, bindings));
                 }
             });
             ui.separator();
             match edited.tool {
-                Tool::Dig => {
-                    ui.label("Left click digs out the Cell in view.");
-                }
+                Tool::Dig => {}
                 Tool::Place => {
                     cell_picker(ui, &mut edited.place, Tool::Place, &elements);
-                    ui.label("Right click places it against the face in view.");
                 }
                 Tool::HeatBrush => {
                     ui.add(
@@ -228,27 +214,51 @@ pub(super) fn draw_palette(
                             .suffix(" K/s")
                             .text("Strength"),
                     );
-                    ui.label(
-                        "Hold the left button to heat the Cells around the one in view. Below \
-                         0 K/s it cools them.",
-                    );
                 }
                 Tool::SpawnFluid => {
                     cell_picker(ui, &mut edited.spawn, Tool::SpawnFluid, &elements);
-                    ui.label("Right click spawns it against the face in view.");
                 }
             }
+            ui.label(tool_hint(edited.tool, bindings));
             ui.separator();
             ui.weak(if captured {
                 "Hold Alt to use this panel."
             } else if *play.get() == Play::Running {
                 "Release Alt to aim again."
+            } else if page.is_open() {
+                "Esc goes back to the pause menu."
             } else {
                 "Esc resumes the World."
             });
         });
     palette.set_if_neq(edited);
     Ok(())
+}
+
+/// A tool's button in the palette: the tool, after what chooses it, such as "1 Dig".
+fn tool_button(tool: Tool, bindings: &Bindings) -> String {
+    match bindings.inputs(Action::choose(tool)) {
+        [] => tool.name().to_owned(),
+        _ => format!("{} {}", bindings.label(Action::choose(tool)), tool.name()),
+    }
+}
+
+/// How to use `tool`, as the palette says it under the tool's settings: "Left Mouse digs out the
+/// Cell in view."
+pub fn tool_hint(tool: Tool, bindings: &Bindings) -> String {
+    let action = Action::use_tool(tool);
+    if bindings.inputs(action).is_empty() {
+        return format!("“{}” is unbound. Bind it in Settings.", action.label());
+    }
+    let input = bindings.label(action);
+    match tool {
+        Tool::Dig => format!("{input} digs out the Cell in view."),
+        Tool::Place => format!("{input} places it against the face in view."),
+        Tool::HeatBrush => format!(
+            "Hold {input} to heat the Cells around the one in view. Below 0 K/s it cools them."
+        ),
+        Tool::SpawnFluid => format!("{input} spawns it against the face in view."),
+    }
 }
 
 /// The Element, Mass and temperature of the Cell `tool` puts down.

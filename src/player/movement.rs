@@ -39,7 +39,7 @@ pub const LIQUID_SPEED: f32 = 0.5;
 /// The fastest the body sinks in a liquid, in metres per second.
 pub const SINK_SPEED: f32 = 2.0;
 
-/// How fast the body swims upward in a liquid while Space is held, in metres per second.
+/// How fast the body swims upward in a liquid while Jump is held, in metres per second.
 pub const SWIM_SPEED: f32 = 3.0;
 
 /// How the body moves.
@@ -66,9 +66,9 @@ impl MoveMode {
 pub struct MoveInput {
     /// Which way to go across the ground, in world space: level, and at most 1 long.
     pub direction: Vec3,
-    /// Space: jump, swim up, or fly up.
+    /// Jump: jump, swim up, or fly up.
     pub up: bool,
-    /// Shift: fly down.
+    /// Fly down.
     pub down: bool,
 }
 

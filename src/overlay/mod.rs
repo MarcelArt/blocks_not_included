@@ -1,6 +1,6 @@
 //! The Overlays (`CONTEXT.md`): views that colour every Cell in the Active Region by its Element,
-//! temperature or Mass, in place of its normal look. O cycles through them: Element, Temperature,
-//! Mass, then off again. A legend in the bottom-right corner names the Overlay shown and its
+//! temperature or Mass, in place of its normal look. The Cycle the Overlays action, by default O,
+//! cycles through them: Element, Temperature, Mass, then off again. A legend in the bottom-right corner names the Overlay shown and its
 //! colours.
 //!
 //! While an Overlay is shown, each loaded Chunk in the Active Region is drawn as translucent
@@ -29,13 +29,11 @@ use sim::{ActiveRegion, ChunkPos, Phase};
 
 use crate::render::{ChunkMesh, ChunkNeighbourhood, face_neighbours, take_nearest};
 use crate::session::{Session, SessionSystems};
+use crate::settings::{Action, ActionInput, Bindings, Settings};
 use crate::sim_bridge::{Elements, SimFocus};
 use crate::world::WorldView;
 use mesh::{OverlayLooks, mesh_overlay};
 use ramp::{BLACK, MAGENTA, Rgb, TEMPERATURE_STOPS, WHITE};
-
-/// The key that cycles through the Overlays.
-const CYCLE_KEY: KeyCode = KeyCode::KeyO;
 
 /// The background while an Overlay is shown.
 const OVERLAY_BACKGROUND: Color = Color::srgb(0.06, 0.06, 0.07);
@@ -44,7 +42,7 @@ const OVERLAY_BACKGROUND: Color = Color::srgb(0.06, 0.06, 0.07);
 /// Overlay has started meshing all of them within two frames.
 const MESHING_STARTS_PER_FRAME: usize = 16;
 
-/// The Overlays, and the key that cycles through them, while a World is open. Needs the session,
+/// The Overlays, and the action that cycles through them, while a World is open. Needs the session,
 /// the sim bridge, the Chunk meshes, and `EguiPlugin`.
 pub struct OverlayPlugin;
 
@@ -52,6 +50,7 @@ impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         let open = in_state(Session::Open);
         app.init_resource::<ShownOverlay>()
+            .init_resource::<Settings>()
             .add_systems(
                 OnEnter(Session::Open),
                 set_up_overlay_meshes.in_set(SessionSystems::Build),
@@ -101,7 +100,7 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    /// In the order O cycles through them.
+    /// In the order they are cycled through.
     pub const ALL: [Overlay; 3] = [Overlay::Element, Overlay::Temperature, Overlay::Mass];
 
     pub fn name(self) -> &'static str {
@@ -118,7 +117,7 @@ impl Overlay {
 pub struct ShownOverlay(pub Option<Overlay>);
 
 impl ShownOverlay {
-    /// The next one in O's cycle: none, then each of [`Overlay::ALL`] in turn, then none again.
+    /// The next one in the cycle: none, then each of [`Overlay::ALL`] in turn, then none again.
     pub fn next(self) -> Self {
         let next = match self.0 {
             None => Overlay::ALL.first(),
@@ -198,9 +197,9 @@ fn set_up_overlay_meshes(mut commands: Commands, mut materials: ResMut<Assets<St
     });
 }
 
-/// O shows the next Overlay in the cycle.
-fn cycle_overlay(keys: Res<ButtonInput<KeyCode>>, mut shown: ResMut<ShownOverlay>) {
-    if keys.just_pressed(CYCLE_KEY) {
+/// The Cycle the Overlays action shows the next Overlay in the cycle.
+fn cycle_overlay(actions: ActionInput, mut shown: ResMut<ShownOverlay>) {
+    if actions.just_pressed(Action::CycleOverlay) {
         *shown = shown.next();
         info!("Overlay: {}", shown.map_or("off", |overlay| overlay.name()));
     }
@@ -379,6 +378,7 @@ fn draw_legend(
     mut contexts: EguiContexts,
     shown: Res<ShownOverlay>,
     elements: Res<Elements>,
+    settings: Res<Settings>,
 ) -> Result {
     egui::Window::new("Overlay")
         .anchor(egui::Align2::RIGHT_BOTTOM, [-8.0, -8.0])
@@ -414,9 +414,19 @@ fn draw_legend(
                     }
                 }
             }
-            ui.weak("O cycles the Overlays.");
+            ui.weak(cycle_hint(&settings.bindings));
         });
     Ok(())
+}
+
+/// How to cycle the Overlays, as the legend says it: "O cycles the Overlays."
+pub fn cycle_hint(bindings: &Bindings) -> String {
+    let action = Action::CycleOverlay;
+    if bindings.inputs(action).is_empty() {
+        format!("“{}” is unbound. Bind it in Settings.", action.label())
+    } else {
+        format!("{} cycles the Overlays.", bindings.label(action))
+    }
 }
 
 /// A square of `color`, followed by `label`.
@@ -442,7 +452,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn o_cycles_from_off_through_each_overlay_and_back_to_off() {
+    fn the_cycle_goes_from_off_through_each_overlay_and_back_to_off() {
         let mut shown = ShownOverlay::default();
         let mut seen = Vec::new();
         for _ in 0..4 {
