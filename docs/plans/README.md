@@ -37,3 +37,12 @@ Steps 01–08 can be tested without opening a window. From step 10 on, each step
 | [21 Flight, Run, Sneak, and pool exits](21-movement-controls.md) | game | done |
 | [22 Solid Element textures](22-solid-textures.md) | game | done |
 | [23 Liquid Element textures](23-liquid-textures.md) | game | done |
+
+## Block art and Run controls
+
+These independent follow-ups use the existing [Element and Phase terminology](../../CONTEXT.md).
+
+| Step | Observable result | Status |
+|---|---|---|
+| [24 Distinct solid block sprites](24-solid-block-sprites.md) | All four solid materials are identifiable by pattern in grayscale during play. | planned |
+| [25 Tap Run while moving forward](25-tap-run.md) | A Run tap sustains forward running until Forward is released, Sneak is pressed, or a block obstructs horizontal movement. | planned |
