@@ -243,7 +243,12 @@ fn controls_section(ui: &mut egui::Ui, editor: &mut SettingsEditor) {
 
 /// What became of the settings: whether they can be kept at all, what was wrong with the file
 /// they were read from, and how the latest apply went.
-fn status_lines(ui: &mut egui::Ui, status: &SettingsStatus, storage: &SettingsStorage, dirty: bool) {
+fn status_lines(
+    ui: &mut egui::Ui,
+    status: &SettingsStatus,
+    storage: &SettingsStorage,
+    dirty: bool,
+) {
     if let Err(why) = storage.store() {
         error_text(
             ui,

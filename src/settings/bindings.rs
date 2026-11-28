@@ -166,7 +166,8 @@ pub enum Action {
     MoveRight,
     /// Jumps, swims upward, or flies upward. Pressed twice quickly, it switches flying on and off.
     Jump,
-    /// Runs, on foot, while held.
+    /// Tapped while going forward on foot, runs until Forward is let go, Sneak is held or the body
+    /// hits a wall (`crate::player::TapRun`).
     Run,
     /// Sneaks, on the ground, while held: slower, and never off a ledge.
     Sneak,

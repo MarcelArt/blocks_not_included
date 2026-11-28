@@ -1,17 +1,16 @@
 //! How the player's body moves (`docs/plans/21-movement-controls.md`, seams 2 and 3), apart from
-//! Bevy's input: walking, running and sneaking, a sneaking body kept on its ledge, the view
-//! widening while running, and swimming out of a pool onto its bank.
+//! Bevy's input: walking, running and sneaking, a sneaking body kept on its ledge, a running body
+//! hitting a wall (`docs/plans/25-tap-run.md`), the view widening while running, and swimming out
+//! of a pool onto its bank.
 //!
 //! Frames are 1/60 s unless a test says otherwise.
 
 use bevy::math::{IVec3, Vec3};
 use blocks_not_included::player::movement::{
-    BODY_SIZE, Body, Gait, JUMP_SPEED, Matter, MoveInput, RUN_SPEED, SNEAK_SPEED, SWIM_SPEED,
-    WALK_SPEED, advance, gait, swimming,
+    BODY_SIZE, Body, Gait, JUMP_SPEED, Matter, MoveInput, MoveMode, RUN_SPEED, SNEAK_SPEED,
+    SWIM_SPEED, WALK_SPEED, advance, gait, move_body, swimming,
 };
-use blocks_not_included::player::view::{
-    FIELD_OF_VIEW, RUN_FIELD_OF_VIEW, RUN_VIEW_EASE, RunView,
-};
+use blocks_not_included::player::view::{FIELD_OF_VIEW, RUN_FIELD_OF_VIEW, RUN_VIEW_EASE, RunView};
 use blocks_not_included::world::{MIN_SURFACE, liquid_fill};
 
 const FRAME: f32 = 1.0 / 60.0;
@@ -190,9 +189,122 @@ fn a_deliberate_jump_leaves_the_ledge_while_sneaking() {
     assert!((landed.feet.y - -4.0).abs() < 1e-3, "{}", landed.feet);
 }
 
+/// Solid ground at y ≤ 0, whose top is at y = 1, and a wall filling x ≥ 3. Gas elsewhere.
+fn walled(cell: IVec3) -> Matter {
+    if cell.y <= 0 || cell.x >= 3 {
+        Matter::Solid
+    } else {
+        Matter::Open
+    }
+}
+
+/// Step 25 (`docs/plans/25-tap-run.md`): the move says when a wall stops it across the ground.
+#[test]
+fn running_into_a_wall_head_on_or_at_an_angle_hits_it() {
+    // Feet at x = 2.5: the body's right side, at x = 2.8, is 0.2 m from the wall's face at x = 3.
+    let body = Body {
+        grounded: true,
+        ..Body::standing_at(Vec3::new(2.5, 1.0, 0.5))
+    };
+    let head_on = MoveInput {
+        run: true,
+        ..forward()
+    };
+    // 0.1 s at 7 m/s would go 0.7 m. The wall stops it after 0.2.
+    let moved = move_body(body, head_on, 0.1, walled);
+    assert!(moved.hit_wall);
+    assert_near(moved.body.feet, Vec3::new(2.7, 1.0, 0.5));
+    assert!(moved.body.grounded, "standing on the ground");
+
+    // At an angle: 7 m/s × √½ × 0.1 s = 0.495 m along each axis. Along x the wall stops it after
+    // 0.2; along z nothing is in the way, so it slides along the wall the whole 0.495.
+    let diagonal = MoveInput {
+        direction: Vec3::new(1.0, 0.0, 1.0).normalize(),
+        run: true,
+        ..MoveInput::default()
+    };
+    let slid = move_body(body, diagonal, 0.1, walled);
+    assert!(slid.hit_wall);
+    let along = 0.5 + RUN_SPEED * std::f32::consts::FRAC_1_SQRT_2 * 0.1;
+    assert_near(slid.body.feet, Vec3::new(2.7, 1.0, along));
+
+    // Flush against the wall, sliding on along it still hits it, while z still moves.
+    let sliding = move_body(slid.body, diagonal, FRAME, walled);
+    assert!(sliding.hit_wall);
+    assert!(
+        sliding.body.feet.z > slid.body.feet.z,
+        "{}",
+        sliding.body.feet
+    );
+
+    // `advance` moves the body just the same.
+    assert_eq!(advance(body, diagonal, 0.1, walled), slid.body);
+
+    // A wall across z, filling z ≥ 3, is hit the same way, while x slides along it.
+    let across_z = |cell: IVec3| walled(IVec3::new(cell.z, cell.y, cell.x));
+    let turned = Body {
+        feet: Vec3::new(0.5, 1.0, 2.5),
+        ..body
+    };
+    let slid_along_x = move_body(turned, diagonal, 0.1, across_z);
+    assert!(slid_along_x.hit_wall);
+    assert_near(slid_along_x.body.feet, Vec3::new(along, 1.0, 2.7));
+
+    // Along the wall, without moving into it, there is nothing to hit.
+    let alongside = MoveInput {
+        direction: Vec3::Z,
+        run: true,
+        ..MoveInput::default()
+    };
+    assert!(!move_body(slid.body, alongside, 0.1, walled).hit_wall);
+    // Flying, the body passes through the wall and hits nothing.
+    let flying = Body {
+        mode: MoveMode::Fly,
+        ..body
+    };
+    assert!(!move_body(flying, head_on, 0.1, walled).hit_wall);
+}
+
+#[test]
+fn a_running_jump_and_its_landing_on_clear_ground_hit_no_wall() {
+    let run = MoveInput {
+        run: true,
+        ..forward()
+    };
+    let jump = MoveInput { up: true, ..run };
+    let jumped = move_body(standing(), jump, FRAME, ground);
+    assert!(!jumped.hit_wall);
+    assert!(jumped.body.velocity.y > 0.0, "it jumped");
+
+    // A jump at 8 m/s under 25 m/s² lasts 2 × 8 / 25 = 0.64 s: well within 1 s.
+    let mut body = jumped.body;
+    let mut landed_after = None;
+    for frame in 0..60 {
+        let moved = move_body(body, run, FRAME, ground);
+        assert!(!moved.hit_wall, "frame {frame}: {:?}", moved.body);
+        body = moved.body;
+        if body.grounded {
+            landed_after = Some(frame);
+            break;
+        }
+    }
+    assert!(landed_after.is_some(), "{body:?}");
+    assert_eq!(body.feet.y, 1.0, "landed on the ground");
+
+    // Running on along the ground, and standing still on it, hit nothing either.
+    for input in [run, MoveInput::default()] {
+        let moved = move_body(body, input, FRAME, ground);
+        assert!(!moved.hit_wall, "{input:?}");
+        assert!(moved.body.grounded, "{input:?}");
+    }
+}
+
 #[test]
 fn the_view_widens_while_running_and_narrows_when_running_stops_or_sneak_takes_over() {
-    assert_eq!((FIELD_OF_VIEW, RUN_FIELD_OF_VIEW, RUN_VIEW_EASE), (70.0, 76.0, 0.25));
+    assert_eq!(
+        (FIELD_OF_VIEW, RUN_FIELD_OF_VIEW, RUN_VIEW_EASE),
+        (70.0, 76.0, 0.25)
+    );
     let mut view = RunView::default();
     assert_eq!(view.field_of_view(), 70.0);
 
@@ -219,10 +331,7 @@ fn the_view_widens_while_running_and_narrows_when_running_stops_or_sneak_takes_o
             run: true,
             ..MoveInput::default()
         },
-        MoveInput {
-            sneak: true,
-            ..run
-        },
+        MoveInput { sneak: true, ..run },
     ] {
         let mut view = RunView::default();
         view.update(gait(&body, &run, ground) == Gait::Run, 0.25);
@@ -385,7 +494,10 @@ fn swim_to(bank: Bank) -> Swim {
     };
     for frame in 0..300 {
         body = advance(body, input, FRAME, world);
-        assert!(bank.holds_clear(&body), "frame {frame}: {body:?} in {bank:?}");
+        assert!(
+            bank.holds_clear(&body),
+            "frame {frame}: {body:?} in {bank:?}"
+        );
         swim.fastest_rise = swim.fastest_rise.max(body.velocity.y);
         if bank.cells > 0 && body.centre().y < bank.waterline() - 0.2 {
             swim.fastest_rise_submerged = swim.fastest_rise_submerged.max(body.velocity.y);
@@ -415,7 +527,11 @@ fn holding_jump_towards_a_bank_up_to_one_cell_above_the_waterline_climbs_out() {
         Bank::new(3, 1.0, 5),
     ] {
         let swim = swim_to(bank);
-        assert!(swim.on_the_bank, "{bank:?}, waterline {}: {swim:?}", bank.waterline());
+        assert!(
+            swim.on_the_bank,
+            "{bank:?}, waterline {}: {swim:?}",
+            bank.waterline()
+        );
         // It swims up to the surface at 3 m/s, and climbs only once afloat there.
         assert!(
             swim.fastest_rise_submerged <= SWIM_SPEED + 1e-4,
@@ -465,7 +581,10 @@ fn dry_jumping_is_as_it_was() {
     let step = swim_to(dry(2));
     assert!(step.on_the_bank, "{step:?}");
     // It leaves at 8 m/s and loses 25 m/s² × 1/60 s in its first frame.
-    assert!((step.fastest_rise - (JUMP_SPEED - 25.0 * FRAME)).abs() < 1e-4, "{step:?}");
+    assert!(
+        (step.fastest_rise - (JUMP_SPEED - 25.0 * FRAME)).abs() < 1e-4,
+        "{step:?}"
+    );
 
     // Two Cells up is a wall.
     let wall = swim_to(dry(3));

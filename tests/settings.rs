@@ -160,7 +160,11 @@ fn an_unreadable_file_is_reported_and_every_setting_takes_its_default() {
         write_file(&store, text);
         let loaded = store.load();
         assert_eq!(loaded.settings, Settings::default(), "{text:?}");
-        assert_eq!(problem_settings(&loaded.problems), ["unreadable"], "{text:?}");
+        assert_eq!(
+            problem_settings(&loaded.problems),
+            ["unreadable"],
+            "{text:?}"
+        );
         assert_eq!(
             fs::read_to_string(store.path()).expect("the file"),
             text,

@@ -36,9 +36,7 @@ pub use bindings::{
     RESERVED_KEYS, Refusal, inputs_label,
 };
 pub use editor::{Offered, Rebinding, SettingsEditor};
-pub use store::{
-    LoadedSettings, SETTINGS_FILE, SETTINGS_VERSION, SettingsProblem, SettingsStore,
-};
+pub use store::{LoadedSettings, SETTINGS_FILE, SETTINGS_VERSION, SettingsProblem, SettingsStore};
 
 use crate::input_policy::{InputPolicySystems, PAUSE_KEY};
 use crate::session::{PauseControl, Play, Session};
@@ -469,9 +467,9 @@ fn handle_settings_actions(
                     continue;
                 }
                 let kept = match storage.store() {
-                    Ok(store) => store
-                        .save(&draft)
-                        .map_err(|error| format!("can't write {}: {error}", store.path().display())),
+                    Ok(store) => store.save(&draft).map_err(|error| {
+                        format!("can't write {}: {error}", store.path().display())
+                    }),
                     Err(why) => Err(format!("there is nowhere to keep them: {why}")),
                 };
                 match &kept {

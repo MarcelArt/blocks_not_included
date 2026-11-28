@@ -437,7 +437,10 @@ fn record_keys(keys: Res<ButtonInput<KeyCode>>, mut seen: ResMut<SeenKeys>) {
 /// Resizes the test window, as the window system does.
 fn set_window_size(app: &mut App, width: u32, height: u32) {
     let entity = app.world().resource::<TestWindow>().0;
-    let mut window = app.world_mut().get_mut::<Window>(entity).expect("the window");
+    let mut window = app
+        .world_mut()
+        .get_mut::<Window>(entity)
+        .expect("the window");
     window.resolution.set_physical_resolution(width, height);
 }
 
@@ -792,7 +795,10 @@ fn settings_over_the_pause_menu_keep_the_world_paused_and_apply_at_once() {
     app.world_mut().resource_mut::<SeenKeys>().0.clear();
     tap(&mut app, KeyCode::KeyJ);
     let editor = settings_page(&mut app).expect("open");
-    assert_eq!(editor.draft.bindings.inputs(Action::Jump), [Input::Key(KeyCode::KeyJ)]);
+    assert_eq!(
+        editor.draft.bindings.inputs(Action::Jump),
+        [Input::Key(KeyCode::KeyJ)]
+    );
     assert_eq!(*editor.rebinding(), Rebinding::Idle);
 
     // Esc while listening only stops listening.
@@ -801,7 +807,11 @@ fn settings_over_the_pause_menu_keep_the_world_paused_and_apply_at_once() {
     let editor = settings_page(&mut app).expect("still open");
     assert_eq!(*editor.rebinding(), Rebinding::Idle);
     assert_eq!(play(&app), Some(Play::Paused));
-    assert_eq!(app.world().resource::<SeenKeys>().0, [], "J and Esc reached nothing else");
+    assert_eq!(
+        app.world().resource::<SeenKeys>().0,
+        [],
+        "J and Esc reached nothing else"
+    );
 
     // Borderless fullscreen applies to the window at once, and Jump and the sensitivity with it.
     let mut editor = settings_page(&mut app).expect("open");
@@ -814,7 +824,10 @@ fn settings_over_the_pause_menu_keep_the_world_paused_and_apply_at_once() {
         WindowMode::BorderlessFullscreen(MonitorSelection::Current)
     );
     let applied = app.world().resource::<Settings>().clone();
-    assert_eq!(applied.bindings.inputs(Action::Jump), [Input::Key(KeyCode::KeyJ)]);
+    assert_eq!(
+        applied.bindings.inputs(Action::Jump),
+        [Input::Key(KeyCode::KeyJ)]
+    );
 
     // Back to a window, at the size chosen.
     settings_page(&mut app).expect("open").draft.display = blocks_not_included::settings::Display {

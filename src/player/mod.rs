@@ -2,13 +2,15 @@
 //! that the Active Region follows. It exists while a World is open.
 //!
 //! Controls, while input is gameplay input (`crate::input_policy`): the mouse looks around, as
-//! fast as the player's mouse sensitivity says. The movement actions move, Jump jumps, Run runs
-//! and Sneak sneaks ([`movement`]). Pressing Jump twice quickly switches flying on and off
-//! ([`flight`]). Flying goes through solids; Jump rises and Fly down sinks. In a liquid, holding
-//! Jump swims upward, and climbs out onto a bank. The view widens while running ([`view`]). The
-//! actions are bound in Settings (`crate::settings`), by default to WASD, Space, Ctrl and Shift:
-//! Shift sneaks on foot and flies down in flight. While Alt is held, the body takes no input but
-//! still falls, swims and slides; while the World is paused, it doesn't move at all.
+//! fast as the player's mouse sensitivity says. The movement actions move, Jump jumps and Sneak
+//! sneaks ([`movement`]). A tap of Run while going forward runs, until Forward is let go, Sneak is
+//! held or the body hits a wall ([`TapRun`]). Pressing Jump twice quickly switches flying on and
+//! off ([`flight`]). Flying goes through solids; Jump rises and Fly down sinks. In a liquid,
+//! holding Jump swims upward, and climbs out onto a bank. The view widens while running
+//! ([`view`]). The actions are bound in Settings (`crate::settings`), by default to WASD, Space,
+//! Ctrl and Shift: Shift sneaks on foot and flies down in flight. While Alt is held, the body
+//! takes no input but still falls, swims and slides; while the World is paused, it doesn't move at
+//! all.
 //!
 //! A World opened without a player spawns them on the ground below the focus ([`ground_below`]).
 //! A saved World's player carries on exactly as saved: where they were, looking the same way,
@@ -35,7 +37,7 @@ use crate::settings::{Action, ActionInput, Bindings, Settings};
 use crate::sim_bridge::{Elements, RENDER_DISTANCE, SimFocus};
 use crate::world::{WorldView, capacity_grams, liquid_fill};
 use flight::{FlightToggle, JumpFrame};
-use movement::{Body, Gait, Matter, MoveInput, MoveMode, advance, gait, swimming};
+use movement::{Body, Gait, Matter, MoveInput, MoveMode, gait, move_body, swimming};
 use view::{FIELD_OF_VIEW, RunView};
 
 /// How far the view turns per pixel the mouse moves at a mouse sensitivity of 1, in radians: about
@@ -73,8 +75,9 @@ impl Plugin for PlayerPlugin {
                 .in_set(PlayerSystems)
                 .run_if(in_state(Play::Running)),
         )
-        // Pausing, leaving the World or closing it forgets a first press of Jump.
-        .add_systems(OnExit(Play::Running), forget_jump_presses);
+        // Pausing, leaving the World or closing it forgets a first press of Jump, and stops
+        // running.
+        .add_systems(OnExit(Play::Running), (forget_jump_presses, stop_running));
     }
 }
 
@@ -121,6 +124,7 @@ fn spawn_player(mut commands: Commands, start: Res<PlayerStart>, focus: Res<SimF
         Player(body),
         awaiting,
         FlightToggle::default(),
+        TapRun::default(),
         RunView::default(),
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
@@ -243,6 +247,16 @@ fn look_around(
     player.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
 }
 
+/// What [`move_player`] changes on the player.
+type MovingPlayer = (
+    &'static mut Player,
+    &'static mut FlightToggle,
+    &'static mut TapRun,
+    &'static mut RunView,
+    &'static mut Transform,
+    &'static mut Projection,
+);
+
 /// Moves the body as the controls say, through the world as the game last heard it from the
 /// simulation, and keeps the camera at its eyes. Two quick presses of Jump switch flying first.
 /// Without gameplay input, the body moves as if no control were held. The view widens while the
@@ -254,18 +268,9 @@ fn move_player(
     policy: Res<InputPolicy>,
     view: Res<WorldView>,
     elements: Res<Elements>,
-    player: Single<
-        (
-            &mut Player,
-            &mut FlightToggle,
-            &mut RunView,
-            &mut Transform,
-            &mut Projection,
-        ),
-        Without<AwaitingSpawn>,
-    >,
+    player: Single<MovingPlayer, Without<AwaitingSpawn>>,
 ) {
-    let (mut player, mut toggle, mut run_view, mut transform, mut projection) =
+    let (mut player, mut toggle, mut run, mut run_view, mut transform, mut projection) =
         player.into_inner();
     let matter_at = |cell: IVec3| matter_in(&view, &elements, cell);
     let jump = JumpFrame {
@@ -281,17 +286,43 @@ fn move_player(
         player.velocity = Vec3::ZERO;
         info!("flying: {}", player.mode == MoveMode::Fly);
     }
-    let input = if policy.gameplay {
-        move_input(&actions, &transform)
+    let controls = if policy.gameplay {
+        Controls::read(&actions)
     } else {
-        MoveInput::default()
+        Controls::default()
     };
 
     let dt = time.delta_secs().min(MAX_FRAME_STEP);
-    run_view.update(gait(&player, &input, matter_at) == Gait::Run, dt);
+    let (body, gait) = step(**player, &controls, &transform, &mut run, dt, matter_at);
+    **player = body;
+    run_view.update(gait == Gait::Run, dt);
     show_field_of_view(&mut projection, run_view.field_of_view());
-    **player = advance(**player, input, dt, matter_at);
     transform.translation = player.eyes();
+}
+
+/// One frame of `controls` for `body`, which faces as `facing` does: starts or stops running as
+/// `run` says, then moves the body for `dt` seconds through the Cells `matter_at` describes. A
+/// wall the body hits across the ground stops running on the same frame. Returns the moved body,
+/// and how it went once a hit is taken into account, which the view follows.
+fn step(
+    body: Body,
+    controls: &Controls,
+    facing: &Transform,
+    run: &mut TapRun,
+    dt: f32,
+    matter_at: impl Fn(IVec3) -> Matter,
+) -> (Body, Gait) {
+    let on_foot = body.mode == MoveMode::Walk && !swimming(&body, &matter_at);
+    let input = controls.move_input(facing, run.read(controls, on_foot));
+    let moved = move_body(body, input, dt, &matter_at);
+    if moved.hit_wall {
+        run.stop();
+    }
+    let resolved = MoveInput {
+        run: run.running(),
+        ..input
+    };
+    (moved.body, gait(&body, &resolved, matter_at))
 }
 
 /// What the body meets in the Cell at `cell`. A liquid's surface stands as high as the fluid
@@ -335,22 +366,96 @@ fn forget_jump_presses(mut toggles: Query<&mut FlightToggle>) {
     }
 }
 
-/// What the controls held ask of the body, which faces as `transform` does.
-fn move_input(actions: &ActionInput, transform: &Transform) -> MoveInput {
-    let axis = |positive: Action, negative: Action| {
-        f32::from(i8::from(actions.pressed(positive)) - i8::from(actions.pressed(negative)))
-    };
-    // Level, whichever way the view tilts.
-    let forward = transform.forward().with_y(0.0).normalize_or_zero();
-    let right = transform.right().with_y(0.0).normalize_or_zero();
-    let direction = forward * axis(Action::MoveForward, Action::MoveBack)
-        + right * axis(Action::MoveRight, Action::MoveLeft);
-    MoveInput {
-        direction: direction.normalize_or_zero(),
-        up: actions.pressed(Action::Jump),
-        down: actions.pressed(Action::Descend),
-        run: actions.pressed(Action::Run),
-        sneak: actions.pressed(Action::Sneak),
+/// Stops the player running, as the World stops running.
+fn stop_running(mut runs: Query<&mut TapRun>) {
+    for mut run in &mut runs {
+        run.stop();
+    }
+}
+
+/// The movement actions during one frame, read through the player's bindings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Controls {
+    forward: bool,
+    back: bool,
+    left: bool,
+    right: bool,
+    jump: bool,
+    descend: bool,
+    sneak: bool,
+    /// Whether an input bound to Run went down during the frame. Holding Run doesn't matter.
+    run_tapped: bool,
+}
+
+impl Controls {
+    fn read(actions: &ActionInput) -> Self {
+        Self {
+            forward: actions.pressed(Action::MoveForward),
+            back: actions.pressed(Action::MoveBack),
+            left: actions.pressed(Action::MoveLeft),
+            right: actions.pressed(Action::MoveRight),
+            jump: actions.pressed(Action::Jump),
+            descend: actions.pressed(Action::Descend),
+            sneak: actions.pressed(Action::Sneak),
+            run_tapped: actions.just_pressed(Action::Run),
+        }
+    }
+
+    /// Whether they go forward: Forward held and Back not, with or without going sideways too.
+    fn going_forward(&self) -> bool {
+        self.forward && !self.back
+    }
+
+    /// What they ask of the body, which faces as `facing` does and runs as `running` says.
+    fn move_input(&self, facing: &Transform, running: bool) -> MoveInput {
+        let axis =
+            |positive: bool, negative: bool| f32::from(i8::from(positive) - i8::from(negative));
+        // Level, whichever way the view tilts.
+        let forward = facing.forward().with_y(0.0).normalize_or_zero();
+        let right = facing.right().with_y(0.0).normalize_or_zero();
+        let direction =
+            forward * axis(self.forward, self.back) + right * axis(self.right, self.left);
+        MoveInput {
+            direction: direction.normalize_or_zero(),
+            up: self.jump,
+            down: self.descend,
+            run: running,
+            sneak: self.sneak,
+        }
+    }
+}
+
+/// Whether the player runs. A tap of Run starts running while the player goes forward
+/// ([`Controls::going_forward`]) on foot: walking, jumping or falling, but not swimming or flying,
+/// and not holding Sneak. Running then lasts, whether Run is held or not, until any of that stops
+/// holding, the body hits a wall across the ground ([`movement::Moved::hit_wall`]), input stops
+/// being gameplay input, or the World stops running. Running again takes a fresh tap of Run.
+///
+/// It lives on the player, so each World's player starts walking.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TapRun {
+    running: bool,
+}
+
+impl TapRun {
+    /// Reads one frame of `controls`, before the body moves, and returns whether it runs.
+    /// `on_foot` says whether the body is walking, and not swimming.
+    fn read(&mut self, controls: &Controls, on_foot: bool) -> bool {
+        if !on_foot || !controls.going_forward() || controls.sneak {
+            self.running = false;
+        } else if controls.run_tapped {
+            self.running = true;
+        }
+        self.running
+    }
+
+    /// Stops running: as the body hits a wall, or as the World stops running.
+    pub fn stop(&mut self) {
+        self.running = false;
+    }
+
+    pub fn running(&self) -> bool {
+        self.running
     }
 }
 
@@ -380,4 +485,340 @@ fn focus_on_player(mut focus: ResMut<SimFocus>, player: Single<&Player, Without<
 /// Where the feet of a body standing in the Cell at `pos` go: the middle of its floor.
 pub fn feet_in(pos: CellPos) -> Vec3 {
     IVec3::new(pos.x, pos.y, pos.z).as_vec3() + Vec3::new(0.5, 0.0, 0.5)
+}
+
+/// The controller's side of running (`docs/plans/25-tap-run.md`): which frames of controls start
+/// and stop it, as [`step`] reads them and moves the body.
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::movement::{RUN_SPEED, SNEAK_SPEED, WALK_SPEED};
+    use super::*;
+
+    const FRAME: f32 = 1.0 / 60.0;
+
+    const NONE: Controls = Controls {
+        forward: false,
+        back: false,
+        left: false,
+        right: false,
+        jump: false,
+        descend: false,
+        sneak: false,
+        run_tapped: false,
+    };
+    const FORWARD: Controls = Controls {
+        forward: true,
+        ..NONE
+    };
+    /// Forward held, and Run tapped.
+    const FORWARD_TAP: Controls = Controls {
+        run_tapped: true,
+        ..FORWARD
+    };
+    /// Forward and Right held: at an angle, facing +x, towards +x and +z.
+    const FORWARD_RIGHT: Controls = Controls {
+        right: true,
+        ..FORWARD
+    };
+
+    /// Solid ground whose top is at y = 1, and a wall filling x ≥ 12. Gas elsewhere.
+    fn walled(cell: IVec3) -> Matter {
+        if cell.y <= 0 || cell.x >= 12 {
+            Matter::Solid
+        } else {
+            Matter::Open
+        }
+    }
+
+    /// Solid ground whose top is at y = 1, and two full layers of liquid on it where x ≥ 3.
+    fn pool(cell: IVec3) -> Matter {
+        match cell.y {
+            ..=0 => Matter::Solid,
+            1..=2 if cell.x >= 3 => Matter::Liquid { fill: 1.0 },
+            _ => Matter::Open,
+        }
+    }
+
+    /// The player, one frame at a time, as `move_player` moves them.
+    struct Rig {
+        body: Body,
+        facing: Transform,
+        run: TapRun,
+    }
+
+    impl Rig {
+        /// Standing on the ground at x = 0.5, z = 0.5, facing +x, towards the wall of [`walled`].
+        fn new() -> Self {
+            Self {
+                body: Body {
+                    grounded: true,
+                    ..Body::standing_at(Vec3::new(0.5, 1.0, 0.5))
+                },
+                facing: Transform::default().looking_to(Vec3::X, Vec3::Y),
+                run: TapRun::default(),
+            }
+        }
+
+        /// One frame of `controls` in `world`. Returns whether the body ran, as the view sees it.
+        fn frame_in(&mut self, world: impl Fn(IVec3) -> Matter, controls: Controls) -> bool {
+            let (body, gait) = step(
+                self.body,
+                &controls,
+                &self.facing,
+                &mut self.run,
+                FRAME,
+                world,
+            );
+            self.body = body;
+            gait == Gait::Run
+        }
+
+        fn frame(&mut self, controls: Controls) -> bool {
+            self.frame_in(walled, controls)
+        }
+
+        /// `frames` frames of `controls`. Returns whether the body ran, which every frame agrees
+        /// on.
+        fn hold(&mut self, frames: usize, controls: Controls) -> bool {
+            let ran: Vec<bool> = (0..frames).map(|_| self.frame(controls)).collect();
+            assert!(ran.iter().all(|&r| r == ran[0]), "{controls:?}: {ran:?}");
+            ran[0]
+        }
+
+        /// How fast the body goes across the ground, in metres per second.
+        #[track_caller]
+        fn assert_speed(&self, expected: f32) {
+            let speed = self.body.velocity.with_y(0.0).length();
+            assert!(
+                (speed - expected).abs() < 1e-4,
+                "{speed} m/s, not {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tap_of_run_while_going_forward_runs_until_forward_is_let_go() {
+        let mut rig = Rig::new();
+        assert!(!rig.run.running(), "a player starts walking");
+
+        // A tap of Run before Forward, and Forward after it, walk.
+        assert!(!rig.frame(Controls {
+            run_tapped: true,
+            ..NONE
+        }));
+        assert!(!rig.hold(5, FORWARD));
+        rig.assert_speed(WALK_SPEED);
+
+        // Forward with a tap of Run runs. Running carries on once Run is let go, or held: either
+        // way the frames after the tap have none.
+        assert!(rig.frame(FORWARD_TAP));
+        rig.assert_speed(RUN_SPEED);
+        assert!(rig.hold(5, FORWARD));
+        rig.assert_speed(RUN_SPEED);
+        // Tapping Run again runs on.
+        assert!(rig.frame(FORWARD_TAP));
+        assert!(rig.hold(5, FORWARD));
+
+        // Letting go of Forward stops running, and going forward again walks.
+        assert!(!rig.frame(NONE));
+        assert!(!rig.hold(5, FORWARD));
+        rig.assert_speed(WALK_SPEED);
+
+        // A fresh tap runs again.
+        assert!(rig.frame(FORWARD_TAP));
+        rig.assert_speed(RUN_SPEED);
+    }
+
+    #[test]
+    fn running_carries_on_through_a_jump_and_its_landing() {
+        let mut rig = Rig::new();
+        assert!(rig.frame(FORWARD_TAP));
+        assert!(rig.frame(Controls {
+            jump: true,
+            ..FORWARD
+        }));
+        assert!(!rig.body.grounded, "it jumped");
+        // A jump lasts 2 × 8 / 25 = 0.64 s: under 60 frames.
+        for frame in 0.. {
+            assert!(frame < 60, "{:?}", rig.body);
+            assert!(rig.frame(FORWARD), "frame {frame}: {:?}", rig.body);
+            rig.assert_speed(RUN_SPEED);
+            if rig.body.grounded {
+                break;
+            }
+        }
+        assert!(rig.hold(5, FORWARD));
+    }
+
+    #[test]
+    fn running_goes_forward_with_or_without_sideways_but_not_sideways_alone() {
+        let right = Controls {
+            right: true,
+            ..NONE
+        };
+        let mut rig = Rig::new();
+        // Forward and Right with a tap of Run run at an angle, towards +x and +z.
+        assert!(rig.frame(Controls {
+            run_tapped: true,
+            ..FORWARD_RIGHT
+        }));
+        rig.assert_speed(RUN_SPEED);
+        assert!(
+            rig.body.velocity.x > 1.0 && rig.body.velocity.z > 1.0,
+            "{:?}",
+            rig.body
+        );
+        // Letting go of Right, or holding Left instead, runs on.
+        assert!(rig.hold(3, FORWARD));
+        assert!(rig.hold(
+            3,
+            Controls {
+                left: true,
+                ..FORWARD
+            }
+        ));
+
+        // Right alone stops running. With Right alone, a tap of Run walks, and so does adding
+        // Forward later.
+        assert!(!rig.frame(right));
+        assert!(!rig.frame(Controls {
+            run_tapped: true,
+            ..right
+        }));
+        assert!(!rig.hold(3, FORWARD_RIGHT));
+        rig.assert_speed(WALK_SPEED);
+
+        // Forward and Back together go nowhere: a tap of Run doesn't run, and adding Back to a
+        // run stops it.
+        let both_ways = Controls {
+            back: true,
+            ..FORWARD
+        };
+        assert!(!rig.frame(Controls {
+            run_tapped: true,
+            ..both_ways
+        }));
+        assert!(rig.frame(FORWARD_TAP));
+        assert!(!rig.frame(both_ways));
+        assert!(!rig.run.running());
+
+        // Nor does a tap of Run run backwards.
+        assert!(!rig.frame(Controls {
+            back: true,
+            run_tapped: true,
+            ..NONE
+        }));
+        rig.assert_speed(WALK_SPEED);
+    }
+
+    #[test]
+    fn sneak_stops_running_and_keeps_a_tap_from_starting_it() {
+        let sneaking = Controls {
+            sneak: true,
+            ..FORWARD
+        };
+        let mut rig = Rig::new();
+        assert!(rig.frame(FORWARD_TAP));
+        // Holding Sneak sneaks, and letting it go walks.
+        assert!(!rig.hold(3, sneaking));
+        rig.assert_speed(SNEAK_SPEED);
+        assert!(!rig.hold(3, FORWARD));
+        rig.assert_speed(WALK_SPEED);
+
+        // Run and Sneak pressed together don't run, while Sneak is held or after it is let go.
+        assert!(!rig.frame(Controls {
+            run_tapped: true,
+            ..sneaking
+        }));
+        assert!(!rig.hold(3, sneaking));
+        assert!(!rig.hold(3, FORWARD));
+        rig.assert_speed(WALK_SPEED);
+    }
+
+    #[test]
+    fn hitting_a_wall_stops_running_though_forward_and_run_are_still_held() {
+        let mut rig = Rig::new();
+        assert!(rig.frame(Controls {
+            run_tapped: true,
+            ..FORWARD_RIGHT
+        }));
+        // At an angle into the wall, whose face is at x = 12: 11.2 m along x, at 7 × √½ ≈ 4.95
+        // m/s, takes about 2.3 s. It runs on every frame until the one on which it reaches the
+        // wall, its feet 0.3 m from the face, and from that very frame the view narrows.
+        for frame in 1.. {
+            assert!(frame < 300, "{:?}", rig.body);
+            let ran = rig.frame(FORWARD_RIGHT);
+            let at_the_wall = (rig.body.feet.x - 11.7).abs() < 1e-3;
+            assert_eq!(ran, !at_the_wall, "frame {frame}: {:?}", rig.body);
+            if at_the_wall {
+                break;
+            }
+        }
+        assert!(!rig.run.running());
+
+        // Sliding on along the wall with Forward and Right, and Run still held, walks: along z at
+        // walking speed × √½.
+        assert!(!rig.hold(5, FORWARD_RIGHT));
+        let along = WALK_SPEED * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((rig.body.velocity.z - along).abs() < 1e-4, "{:?}", rig.body);
+
+        // Turned along the wall, clear of it, Forward walks until a fresh tap of Run.
+        rig.facing = Transform::default().looking_to(Vec3::Z, Vec3::Y);
+        assert!(!rig.hold(5, FORWARD));
+        rig.assert_speed(WALK_SPEED);
+        assert!(rig.frame(FORWARD_TAP));
+        assert!(rig.hold(5, FORWARD));
+        rig.assert_speed(RUN_SPEED);
+    }
+
+    #[test]
+    fn swimming_flying_or_losing_gameplay_input_stops_running() {
+        // Without gameplay input, the controls read as nothing held.
+        let mut rig = Rig::new();
+        assert!(rig.frame(FORWARD_TAP));
+        assert!(!rig.frame(Controls::default()));
+        assert!(!rig.hold(3, FORWARD));
+
+        // Switching to flight stops it, and walking again walks. A tap in flight starts nothing.
+        assert!(rig.frame(FORWARD_TAP));
+        rig.body.mode = MoveMode::Fly;
+        assert!(!rig.frame(FORWARD));
+        assert!(!rig.run.running());
+        assert!(!rig.frame(FORWARD_TAP));
+        assert!(!rig.run.running());
+        rig.body.mode = MoveMode::Walk;
+        assert!(!rig.frame(FORWARD));
+
+        // Running into a pool stops once the body swims, and a tap in it starts nothing.
+        let mut rig = Rig::new();
+        assert!(rig.frame_in(pool, FORWARD_TAP));
+        let mut frames = 1;
+        while rig.frame_in(pool, FORWARD) {
+            frames += 1;
+            assert!(frames < 120, "{:?}", rig.body);
+        }
+        assert!(swimming(&rig.body, pool), "{:?}", rig.body);
+        assert!(!rig.run.running());
+        assert!(!rig.frame_in(pool, FORWARD_TAP));
+        assert!(!rig.run.running());
+    }
+
+    #[test]
+    fn pausing_stops_running_until_a_fresh_tap() {
+        let mut rig = Rig::new();
+        assert!(rig.frame(FORWARD_TAP));
+
+        // The World pauses: `stop_running` runs as it stops running.
+        let mut world = World::new();
+        let player = world.spawn(rig.run).id();
+        world.run_system_once(stop_running).expect("stop_running");
+        rig.run = *world.get::<TapRun>(player).expect("the player's TapRun");
+        assert!(!rig.run.running());
+
+        // Resumed with Forward and Run still held, it walks until a fresh tap of Run.
+        assert!(!rig.hold(3, FORWARD));
+        assert!(rig.frame(FORWARD_TAP));
+    }
 }

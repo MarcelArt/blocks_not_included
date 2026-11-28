@@ -23,7 +23,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::input::EguiWantsInput;
 use blocks_not_included::debug_panel::{DebugPanelPlugin, SimClock};
 use blocks_not_included::input_policy::{InputPolicy, InputPolicyPlugin};
-use blocks_not_included::player::movement::{Body, MoveMode};
+use blocks_not_included::player::movement::{Body, MoveMode, RUN_SPEED, SNEAK_SPEED, WALK_SPEED};
 use blocks_not_included::player::{AwaitingSpawn, Player, PlayerPlugin};
 use blocks_not_included::render::{ChunkLayer, ChunkMesh, ChunkMeshPlugin};
 use blocks_not_included::saves::{PlayerState, WorldSave};
@@ -806,7 +806,9 @@ fn jump_pressed_twice_switches_flying_and_running_widens_the_view() {
     });
     let body = |app: &mut App| player(app).expect("the player").0;
     let clock = |app: &mut App, ms: u64| {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(ms)));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            ms,
+        )));
     };
     // Frames of 20 ms on the app's clocks.
     clock(&mut app, 20);
@@ -845,18 +847,28 @@ fn jump_pressed_twice_switches_flying_and_running_widens_the_view() {
     clock(&mut app, 0);
     tap(&mut app, KeyCode::Space);
     tap(&mut app, KeyCode::Escape);
-    update_until(&mut app, "the World pauses", |app| play(app) == Some(Play::Paused));
+    update_until(&mut app, "the World pauses", |app| {
+        play(app) == Some(Play::Paused)
+    });
     tap(&mut app, KeyCode::Escape);
     assert_eq!(play(&app), Some(Play::Running));
     tap(&mut app, KeyCode::Space);
-    assert_eq!(body(&mut app).mode, MoveMode::Fly, "the pause forgot the first press");
+    assert_eq!(
+        body(&mut app).mode,
+        MoveMode::Fly,
+        "the pause forgot the first press"
+    );
     clock(&mut app, 400);
     app.update();
     clock(&mut app, 0);
     tap(&mut app, KeyCode::Space);
     tap(&mut app, KeyCode::AltLeft);
     tap(&mut app, KeyCode::Space);
-    assert_eq!(body(&mut app).mode, MoveMode::Fly, "Alt forgot the first press");
+    assert_eq!(
+        body(&mut app).mode,
+        MoveMode::Fly,
+        "Alt forgot the first press"
+    );
 
     // Two more presses land, and the body falls back to the ground.
     clock(&mut app, 400);
@@ -878,7 +890,11 @@ fn jump_pressed_twice_switches_flying_and_running_widens_the_view() {
             .query::<(&Player, &Transform, &Projection)>()
             .single(app.world())
             .expect("the player's camera");
-        assert_eq!(transform.translation, player.eyes(), "the camera left the eyes");
+        assert_eq!(
+            transform.translation,
+            player.eyes(),
+            "the camera left the eyes"
+        );
         match projection {
             Projection::Perspective(perspective) => perspective.fov.to_degrees(),
             other => panic!("{other:?}"),
@@ -898,4 +914,120 @@ fn jump_pressed_twice_switches_flying_and_running_widens_the_view() {
         view(&mut app);
     }
     assert!((view(&mut app) - 70.0).abs() < 1e-3);
+}
+
+/// How the player goes during the frame just run: the view's vertical field of view, in degrees,
+/// and their speed across the ground, in metres per second. The camera must be at their eyes.
+fn going(app: &mut App) -> (f32, f32) {
+    let (player, transform, projection) = app
+        .world_mut()
+        .query::<(&Player, &Transform, &Projection)>()
+        .single(app.world())
+        .expect("the player's camera");
+    assert_eq!(
+        transform.translation,
+        player.eyes(),
+        "the camera left the eyes"
+    );
+    let fov = match projection {
+        Projection::Perspective(perspective) => perspective.fov.to_degrees(),
+        other => panic!("{other:?}"),
+    };
+    (fov, player.velocity.with_y(0.0).length())
+}
+
+/// Asserts that the player goes as [`going`] says: within 0.001° and 0.001 m/s.
+#[track_caller]
+fn assert_going(app: &mut App, fov: f32, speed: f32, why: &str) {
+    let (actual_fov, actual_speed) = going(app);
+    assert!(
+        (actual_fov - fov).abs() < 1e-3 && (actual_speed - speed).abs() < 1e-3,
+        "{why}: {actual_fov}° at {actual_speed} m/s, not {fov}° at {speed} m/s"
+    );
+}
+
+/// Step 25 (`docs/plans/25-tap-run.md`): in the game, with the default bindings, a tap of Ctrl
+/// while W is held runs, and running lasts once Ctrl is let go. Shift, letting go of W, and a
+/// pause each stop it, and W then walks until Ctrl goes down again. Ctrl tapped before W runs
+/// nothing.
+#[test]
+fn a_tap_of_run_while_going_forward_runs_until_sneak_forward_released_or_a_pause() {
+    let mut app = session_app();
+    open(&mut app, new_world(None));
+    // Cells of unloaded Chunks stop the body like walls, so wait for the Chunks around it.
+    update_until(&mut app, "the Chunks around the player load", |app| {
+        let Some((body, _, None)) = player(app) else {
+            return false;
+        };
+        let feet = body.feet.floor().as_ivec3();
+        let centre = ChunkPos::of(CellPos::new(feet.x, feet.y, feet.z));
+        body.grounded
+            && (-1..=1).all(|x| {
+                (-1..=1).all(|z| {
+                    view(app)
+                        .chunk(ChunkPos::new(centre.x + x, centre.y, centre.z + z))
+                        .is_some()
+                })
+            })
+    });
+    // Frames of 20 ms: 15 of them, 0.3 s, ease the view fully in or out.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        20,
+    )));
+    let frames = |app: &mut App, frames: usize| {
+        for _ in 0..frames {
+            app.update();
+            going(app);
+        }
+    };
+    let (walking, running, sneaking) = (WALK_SPEED, RUN_SPEED, SNEAK_SPEED);
+
+    tap(&mut app, KeyCode::ControlLeft);
+    key(&mut app, KeyCode::KeyW, ButtonState::Pressed);
+    frames(&mut app, 15);
+    assert_going(&mut app, 70.0, walking, "Ctrl tapped before W");
+
+    tap(&mut app, KeyCode::ControlLeft);
+    frames(&mut app, 15);
+    assert_going(
+        &mut app,
+        76.0,
+        running,
+        "Ctrl tapped with W held, then let go",
+    );
+
+    key(&mut app, KeyCode::ShiftLeft, ButtonState::Pressed);
+    app.update();
+    assert!((going(&mut app).1 - sneaking).abs() < 1e-3, "Shift sneaks");
+    key(&mut app, KeyCode::ShiftLeft, ButtonState::Released);
+    frames(&mut app, 15);
+    assert_going(&mut app, 70.0, walking, "W alone, after Shift");
+
+    key(&mut app, KeyCode::ControlLeft, ButtonState::Pressed);
+    frames(&mut app, 15);
+    assert_going(&mut app, 76.0, running, "Ctrl down again, and held");
+    key(&mut app, KeyCode::KeyW, ButtonState::Released);
+    app.update();
+    key(&mut app, KeyCode::KeyW, ButtonState::Pressed);
+    frames(&mut app, 15);
+    assert_going(
+        &mut app,
+        70.0,
+        walking,
+        "W let go and pressed again, Ctrl held",
+    );
+
+    key(&mut app, KeyCode::ControlLeft, ButtonState::Released);
+    tap(&mut app, KeyCode::ControlLeft);
+    frames(&mut app, 15);
+    assert_going(&mut app, 76.0, running, "Ctrl tapped again");
+    key(&mut app, KeyCode::ControlLeft, ButtonState::Pressed);
+    tap(&mut app, KeyCode::Escape);
+    update_until(&mut app, "the World pauses", |app| {
+        play(app) == Some(Play::Paused)
+    });
+    tap(&mut app, KeyCode::Escape);
+    assert_eq!(play(&app), Some(Play::Running));
+    frames(&mut app, 15);
+    assert_going(&mut app, 70.0, walking, "resumed with W and Ctrl held");
 }

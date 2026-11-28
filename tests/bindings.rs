@@ -108,7 +108,10 @@ fn esc_alt_and_the_fixed_shortcuts_are_refused_and_the_editor_keeps_listening() 
 
     // Still listening, it takes the next input that can be bound.
     assert_eq!(editor.offer(key(KeyCode::KeyJ)), Offered::Bound);
-    assert_eq!(editor.draft.bindings.inputs(Action::Jump), [key(KeyCode::KeyJ)]);
+    assert_eq!(
+        editor.draft.bindings.inputs(Action::Jump),
+        [key(KeyCode::KeyJ)]
+    );
     assert_eq!(*editor.rebinding(), Rebinding::Idle);
 
     // F no longer switches flying, which two presses of Jump do: it can be bound.
@@ -141,10 +144,10 @@ fn an_input_another_action_uses_at_the_same_time_asks_before_it_is_taken() {
     assert_eq!(*editor.rebinding(), Rebinding::Idle);
 
     // Dig applies while walking forward. Taking W leaves Move forward its other key.
-    editor
-        .draft
-        .bindings
-        .set(Action::MoveForward, vec![key(KeyCode::KeyW), key(KeyCode::ArrowUp)]);
+    editor.draft.bindings.set(
+        Action::MoveForward,
+        vec![key(KeyCode::KeyW), key(KeyCode::ArrowUp)],
+    );
     editor.listen(Action::Dig);
     assert_eq!(editor.offer(key(KeyCode::KeyW)), Offered::Conflict);
     editor.replace();
@@ -173,7 +176,11 @@ fn actions_that_never_apply_at_once_may_share_an_input() {
     assert_eq!(editor.offer(mouse(MouseButton::Left)), Offered::Bound);
     let bindings = &editor.draft.bindings;
     for action in [Action::Dig, Action::HeatBrush, Action::Place] {
-        assert_eq!(bindings.inputs(action), [mouse(MouseButton::Left)], "{action:?}");
+        assert_eq!(
+            bindings.inputs(action),
+            [mouse(MouseButton::Left)],
+            "{action:?}"
+        );
     }
     assert_eq!(bindings.check(), Ok(()));
 
@@ -192,12 +199,19 @@ fn actions_that_never_apply_at_once_may_share_an_input() {
     assert_eq!(Action::Sneak.context(), Context::walking());
     assert_eq!(Action::Run.context(), Context::walking());
     let bindings = Bindings::default();
-    assert_eq!(bindings.inputs(Action::Sneak), bindings.inputs(Action::Descend));
+    assert_eq!(
+        bindings.inputs(Action::Sneak),
+        bindings.inputs(Action::Descend)
+    );
     let mut editor = fresh_editor();
     editor.listen(Action::Descend);
     assert_eq!(editor.offer(key(KeyCode::KeyC)), Offered::Bound);
     editor.listen(Action::Descend);
-    assert_eq!(editor.offer(key(KeyCode::ShiftRight)), Offered::Bound, "Shift again");
+    assert_eq!(
+        editor.offer(key(KeyCode::ShiftRight)),
+        Offered::Bound,
+        "Shift again"
+    );
 
     // Run and Sneak both apply on foot, so they can't share one.
     editor.listen(Action::Sneak);
@@ -298,13 +312,19 @@ fn the_hints_name_the_controls_as_bound() {
     bindings.set(Action::Dig, vec![key(KeyCode::KeyG)]);
     bindings.set(Action::Place, vec![mouse(MouseButton::Back)]);
     bindings.set(Action::CycleOverlay, vec![key(KeyCode::Tab)]);
-    assert_eq!(tool_hint(Tool::Dig, &bindings), "G digs out the Cell in view.");
+    assert_eq!(
+        tool_hint(Tool::Dig, &bindings),
+        "G digs out the Cell in view."
+    );
     assert_eq!(
         tool_hint(Tool::Place, &bindings),
         "Mouse 4 places it against the face in view."
     );
     assert_eq!(cycle_hint(&bindings), "Tab cycles the Overlays.");
-    bindings.set(Action::Jump, vec![key(KeyCode::KeyJ), mouse(MouseButton::Forward)]);
+    bindings.set(
+        Action::Jump,
+        vec![key(KeyCode::KeyJ), mouse(MouseButton::Forward)],
+    );
     assert_eq!(
         flight_hint(&bindings),
         "Press J or Mouse 5 twice quickly to switch flying on and off."

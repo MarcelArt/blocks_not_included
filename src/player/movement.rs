@@ -1,8 +1,10 @@
 //! How the player's body moves each frame: on foot under gravity, swimming, or flying.
 //!
-//! - **On foot**, Run runs while the body moves, and Sneak sneaks while it stands on the ground:
-//!   slower, and never off the edge of what it stands on. Sneak takes precedence over Run. Jump
-//!   jumps from the ground, sneaking or not, so a jump can leave a ledge.
+//! - **On foot**, the body runs while [`MoveInput::run`] says so and it moves, and Sneak sneaks
+//!   while it stands on the ground: slower, and never off the edge of what it stands on. Sneak
+//!   takes precedence over running. Jump jumps from the ground, sneaking or not, so a jump can
+//!   leave a ledge. The player starts running with a tap of Run (`super::TapRun`), and a wall the
+//!   body hits across the ground stops it ([`Moved::hit_wall`]).
 //! - **Swimming**, while the surface of a liquid stands above the body's centre. A partly filled
 //!   Cell's surface stands as high as the fluid meshes draw it (`crate::world::liquid_fill`), so
 //!   shallows are waded through on foot.
@@ -135,7 +137,7 @@ pub struct MoveInput {
     pub up: bool,
     /// Fly down.
     pub down: bool,
-    /// Run, on foot.
+    /// Run, on foot: running as a tap of Run started it (`super::TapRun`), not Run held.
     pub run: bool,
     /// Sneak, on foot.
     pub sneak: bool,
@@ -145,7 +147,7 @@ pub struct MoveInput {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gait {
     Walk,
-    /// On foot, moving, with Run held and Sneak not.
+    /// On foot, moving, running and not sneaking.
     Run,
     /// On the ground, with Sneak held.
     Sneak,
@@ -218,8 +220,8 @@ pub fn swimming(body: &Body, matter_at: impl Fn(IVec3) -> Matter) -> bool {
         && liquid_surface(centre, matter_at).is_some_and(|surface| surface > centre.y)
 }
 
-/// How `body` goes during a frame of `input`. On foot, Sneak takes precedence over Run: holding
-/// both sneaks on the ground, and walks in the air.
+/// How `body` goes during a frame of `input`. On foot, Sneak takes precedence over running:
+/// running while Sneak is held sneaks on the ground, and walks in the air.
 pub fn gait(body: &Body, input: &MoveInput, matter_at: impl Fn(IVec3) -> Matter) -> Gait {
     if body.mode == MoveMode::Fly {
         Gait::Fly
@@ -238,15 +240,41 @@ pub fn gait(body: &Body, input: &MoveInput, matter_at: impl Fn(IVec3) -> Matter)
     }
 }
 
-/// Moves `body` through `dt` seconds of `input`, flying or walking as its mode says.
+/// What a frame's move did to the body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Moved {
+    /// The body after the move.
+    pub body: Body,
+    /// Whether a solid Cell cut the move across the ground short, along x or z: the body walked
+    /// into a wall, head-on or sliding along it. Standing on the ground, landing, and bumping a
+    /// ceiling don't count.
+    pub hit_wall: bool,
+}
+
+/// Moves `body` through `dt` seconds of `input`, flying or walking as its mode says, and says
+/// whether it hit a wall. A flying body passes through walls, so never hits one.
 ///
 /// `matter_at` says what each Cell holds. It should treat a Cell whose Chunk isn't loaded as
 /// solid, so the body can't fall into unloaded space.
-pub fn advance(body: Body, input: MoveInput, dt: f32, matter_at: impl Fn(IVec3) -> Matter) -> Body {
+pub fn move_body(
+    body: Body,
+    input: MoveInput,
+    dt: f32,
+    matter_at: impl Fn(IVec3) -> Matter,
+) -> Moved {
     match body.mode {
-        MoveMode::Fly => fly(body, input, dt),
+        MoveMode::Fly => Moved {
+            body: fly(body, input, dt),
+            hit_wall: false,
+        },
         MoveMode::Walk => walk(body, input, dt, matter_at),
     }
+}
+
+/// Moves `body` through `dt` seconds of `input`, as [`move_body`] does, without saying whether it
+/// hit a wall.
+pub fn advance(body: Body, input: MoveInput, dt: f32, matter_at: impl Fn(IVec3) -> Matter) -> Body {
+    move_body(body, input, dt, matter_at).body
 }
 
 /// Moves straight where the input says, through anything.
@@ -262,7 +290,7 @@ fn fly(body: Body, input: MoveInput, dt: f32) -> Body {
 }
 
 /// Moves under gravity, or swims, stopped by solid Cells.
-fn walk(body: Body, input: MoveInput, dt: f32, matter_at: impl Fn(IVec3) -> Matter) -> Body {
+fn walk(body: Body, input: MoveInput, dt: f32, matter_at: impl Fn(IVec3) -> Matter) -> Moved {
     let solid = |cell: IVec3| matter_at(cell) == Matter::Solid;
     let gait = gait(&body, &input, &matter_at);
     let mut fall_speed = body.velocity.y;
@@ -305,7 +333,10 @@ fn walk(body: Body, input: MoveInput, dt: f32, matter_at: impl Fn(IVec3) -> Matt
     {
         moved_body.velocity.y = moved_body.velocity.y.max(lift);
     }
-    moved_body
+    Moved {
+        body: moved_body,
+        hit_wall: moved.blocked.x || moved.blocked.z,
+    }
 }
 
 /// The part of `velocity` across the ground that a sneaking body filling `aabb` may move with for

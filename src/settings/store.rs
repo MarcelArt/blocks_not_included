@@ -65,7 +65,9 @@ impl fmt::Display for SettingsProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreadable(why) => write!(f, "the settings file can't be read: {why}"),
-            Self::Invalid { setting, why } => write!(f, "the setting “{setting}” is invalid: {why}"),
+            Self::Invalid { setting, why } => {
+                write!(f, "the setting “{setting}” is invalid: {why}")
+            }
         }
     }
 }
@@ -128,8 +130,8 @@ impl SettingsStore {
         settings
             .check()
             .map_err(|problem| io::Error::new(io::ErrorKind::InvalidInput, problem.to_string()))?;
-        let text = ron::ser::to_string_pretty(&ToStore(settings), pretty())
-            .map_err(io::Error::other)?;
+        let text =
+            ron::ser::to_string_pretty(&ToStore(settings), pretty()).map_err(io::Error::other)?;
         fs::create_dir_all(&self.dir)?;
         self.remove_staged();
         let staged = self
