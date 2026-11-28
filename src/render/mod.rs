@@ -114,20 +114,21 @@ fn set_up_chunk_meshes(
     assets: Res<AssetServer>,
     elements: Res<Elements>,
 ) {
+    let atlas = |path: &'static str| {
+        assets
+            .load_builder()
+            .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
+                use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+                settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                    address_mode_u: ImageAddressMode::Repeat,
+                    ..ImageSamplerDescriptor::nearest()
+                });
+            })
+            .load(path)
+    };
     let solid = StandardMaterial {
         base_color: Color::WHITE,
-        base_color_texture: Some(
-            assets
-                .load_builder()
-                .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
-                    use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
-                    settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                        address_mode_u: ImageAddressMode::Repeat,
-                        ..ImageSamplerDescriptor::nearest()
-                    });
-                })
-                .load("textures/solids.png"),
-        ),
+        base_color_texture: Some(atlas("textures/solids.png")),
         // Rock and soil: matte, with no highlights.
         perceptual_roughness: 1.0,
         reflectance: 0.1,
@@ -136,6 +137,7 @@ fn set_up_chunk_meshes(
     // Fluid faces show from both sides, so a surface stays visible from beneath it, and from
     // inside a cloud of gas. Translucent faces don't write depth, so overlapping ones all show.
     let liquid = StandardMaterial {
+        base_color_texture: Some(atlas("textures/liquids.png")),
         base_color: Color::WHITE,
         alpha_mode: AlphaMode::Blend,
         // A smooth surface that catches the sun.

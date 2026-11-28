@@ -17,6 +17,25 @@ use crate::world::{capacity_grams, liquid_fill};
 /// How opaque a liquid is drawn.
 pub const LIQUID_ALPHA: f32 = 0.6;
 
+/// Each artwork row in liquids.png is followed by a copy for sampling its wrap edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LiquidTile {
+    Water,
+    Magma,
+    Flat,
+}
+
+impl LiquidTile {
+    fn uv(self, u: f32, v: f32) -> [f32; 2] {
+        let row = match self {
+            Self::Water => v,
+            Self::Magma => 2.0 + v,
+            Self::Flat => 4.5,
+        };
+        [u, row / 5.0]
+    }
+}
+
 /// How a Cell of each Element takes part in drawing fluids.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Look {
@@ -26,6 +45,7 @@ enum Look {
     /// A fluid shows no face against it, which would be hidden anyway.
     Solid,
     Liquid {
+        tile: LiquidTile,
         /// Linear RGBA, at [`LIQUID_ALPHA`].
         color: [f32; 4],
         /// Mass of a full Cell: Density × 1 m³.
@@ -55,6 +75,11 @@ impl FluidLooks {
                 match element.phase {
                     Phase::Solid => Look::Solid,
                     Phase::Liquid => Look::Liquid {
+                        tile: match element.name.as_str() {
+                            "Water" => LiquidTile::Water,
+                            "Magma" => LiquidTile::Magma,
+                            _ => LiquidTile::Flat,
+                        },
                         color: [r, g, b, LIQUID_ALPHA],
                         capacity_grams: capacity_grams(element),
                     },
@@ -112,6 +137,7 @@ pub fn mesh_fluids(neighbourhood: &ChunkNeighbourhood, looks: &FluidLooks) -> Fl
         let around = Around {
             neighbourhood,
             looks,
+            look,
             pos: chunk_local(index).map(|c| c as i32),
             cell,
         };
@@ -119,6 +145,7 @@ pub fn mesh_fluids(neighbourhood: &ChunkNeighbourhood, looks: &FluidLooks) -> Fl
             Look::Liquid {
                 color,
                 capacity_grams,
+                ..
             } => around.mesh_liquid(color, capacity_grams, &mut geometry.liquid),
             Look::TintedGas { color } => around.mesh_gas(color, &mut geometry.gas),
             Look::Clear | Look::Solid => {}
@@ -131,6 +158,7 @@ pub fn mesh_fluids(neighbourhood: &ChunkNeighbourhood, looks: &FluidLooks) -> Fl
 struct Around<'a> {
     neighbourhood: &'a ChunkNeighbourhood,
     looks: &'a FluidLooks,
+    look: Look,
     /// Relative to the Chunk's origin.
     pos: [i32; 3],
     cell: Cell,
@@ -236,7 +264,18 @@ impl Around<'_> {
         let mut normal = [0.0; 3];
         normal[axis] = if positive { 1.0 } else { -1.0 };
         for (along_u, along_v) in corners {
-            geometry.positions.push(corner(along_u, along_v));
+            let position = corner(along_u, along_v);
+            if let Look::Liquid { tile, .. } = self.look {
+                let [px, py, pz] = position;
+                // One repeat per Cell. Vertical faces sample only their visible height.
+                let (u, v) = match axis {
+                    0 => (pz, py - y),
+                    1 => (px, pz - z),
+                    _ => (px, py - y),
+                };
+                geometry.uvs.push(tile.uv(u, v));
+            }
+            geometry.positions.push(position);
             geometry.normals.push(normal);
             geometry.colors.push(color);
         }
@@ -333,6 +372,70 @@ mod tests {
     /// The top face of the Cell whose lowest corner is `(x, y, z)`, at `y + height`.
     fn top([x, y, z]: [f32; 3], height: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
         (UP, [x, y + height, z], [x + 1.0, y + height, z + 1.0])
+    }
+
+    #[test]
+    fn water_step_samples_the_upper_three_quarters_of_its_tile() {
+        let world = world_with_mass(&[
+            (CellPos::new(31, 6, 7), "Water", 1_000_000),
+            (CellPos::new(32, 6, 7), "Water", 250_000),
+        ]);
+        let mesh = geometry(&world).liquid.into_mesh();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+            mesh.attribute(bevy::prelude::Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("liquid faces need texture coordinates");
+        };
+        // Top, underside, then the east face. Water occupies the first of five tile rows.
+        assert_eq!(
+            &uvs[8..12],
+            &[[7.0, 0.05], [7.0, 0.2], [8.0, 0.2], [8.0, 0.05]]
+        );
+    }
+
+    #[test]
+    fn surfaces_repeat_across_chunks_at_both_fill_heights() {
+        let world = world_with_mass(&[
+            (CellPos::new(31, 6, 7), "Water", 1_000_000),
+            (CellPos::new(32, 6, 7), "Water", 250_000),
+        ]);
+        for (chunk_x, x, height) in [(0, 31.0, 7.0), (1, 0.0, 6.25)] {
+            let chunk = ChunkNeighbourhood::gather(sim::ChunkPos::new(chunk_x, 0, 0), |pos| {
+                world.get(&pos).cloned()
+            })
+            .unwrap();
+            let liquid = mesh_fluids(&chunk, &FluidLooks::new(&elements())).liquid;
+            for i in 0..8 {
+                let [px, py, pz] = liquid.positions[i];
+                assert_eq!(py, if i < 4 { height } else { 6.0 });
+                assert!(px == x || px == x + 1.0);
+                // x wraps every metre. Both surfaces span exactly Water's first row.
+                assert_eq!(liquid.uvs[i], [px, if pz == 7.0 { 0.0 } else { 0.2 }]);
+            }
+        }
+    }
+
+    #[test]
+    fn liquid_tiles_follow_element_names_and_gas_keeps_its_tint() {
+        let cells = world(&[(CellPos::new(5, 6, 7), "Granite")]);
+        let chunk = origin_neighbourhood(&cells);
+        for (name, row) in [("Water", 0.0), ("Magma", 0.4), ("Brine", 0.9)] {
+            let mut table = ElementTable::new();
+            table.add(
+                sim::Element::new(name)
+                    .phase(Phase::Liquid)
+                    .color([0.4, 0.3, 0.7]),
+            );
+            let liquid = mesh_fluids(&chunk, &FluidLooks::new(&table)).liquid;
+            assert_eq!(liquid.uvs[0][1], row);
+            assert_eq!(liquid.colors, vec![[0.4, 0.3, 0.7, LIQUID_ALPHA]; 24]);
+            if name == "Brine" {
+                assert!(liquid.uvs.iter().all(|uv| uv[1] == 0.9));
+            }
+        }
+        let gas = geometry(&world(&[(CellPos::new(5, 6, 7), "Steam")])).gas;
+        assert!(gas.uvs.is_empty());
+        assert_eq!(gas.colors, vec![STEAM; 24]);
     }
 
     #[test]

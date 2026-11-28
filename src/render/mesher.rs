@@ -191,7 +191,7 @@ pub struct ChunkGeometry {
     /// Linear RGBA.
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
-    uvs: Vec<[f32; 2]>,
+    pub(super) uvs: Vec<[f32; 2]>,
 }
 
 /// Meshes the solid Cells of a Chunk. Faces between two solid Cells are left out, and so are
