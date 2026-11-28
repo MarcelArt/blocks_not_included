@@ -44,5 +44,5 @@ These independent follow-ups use the existing [Element and Phase terminology](..
 
 | Step | Observable result | Status |
 |---|---|---|
-| [24 Distinct solid block sprites](24-solid-block-sprites.md) | All four solid materials are identifiable by pattern in grayscale during play. | planned |
+| [24 Distinct solid block sprites](24-solid-block-sprites.md) | All four solid materials are identifiable by pattern in grayscale during play. | implemented · separate sunlight and shade captures pending |
 | [25 Tap Run while moving forward](25-tap-run.md) | A Run tap sustains forward running until Forward is released, Sneak is pressed, or a block obstructs horizontal movement. | planned |

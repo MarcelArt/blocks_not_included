@@ -27,3 +27,11 @@ Replace the artwork for all four shipped solid Elements in `assets/textures/soli
 - Run `cargo test --workspace`, including the UV, band-selection and white-fallback tests in `src/render/mesher.rs`. Inspect the packed PNG for 34 identical repeats per band and a final white 16 × 16 tile.
 - Run `cargo run`. Place adjacent patches of all four solids, large enough to see several repeats on their tops and sides. Inspect at ordinary walking distance in sunlight and shade with diagnostic Overlays off. Capture both views, convert copies to grayscale, and identify each material by its stated pattern with the readout hidden.
 - Done when all four can be identified in both grayscale views, the colour views look coherent, and the repeats show no join lines or neighbouring atlas bands.
+
+## Implementation and verification
+
+The four 16 × 16 tiles were generated with the ImageGen CLI. Ice received a hand-edited fracture highlight after downsampling so its thin lines remain visible at walking distance.
+
+- `cargo test --workspace` passed, including the mesher tests. Inspection of the shipped PNG confirmed 34 identical copies per material band and a white 16 × 16 fallback tile.
+- `cargo run` launched successfully. The solid-block inspection scene showed all four patches side by side with diagnostic Overlays off. In grayscale, Dirt's packed clumps, Granite's angular grains, Ice's fractures and Igneous Rock's pits remained distinguishable. No join lines or neighbouring bands were visible. [Colour capture](../../output/solid-sprites/materials.png) · [Grayscale capture](../../output/solid-sprites/materials-grayscale.png)
+- **Pending** — The capture shows sunlit tops and shaded sides in one frame. The remaining acceptance check is to capture separate sunlight and shade views at walking distance and identify all four materials in each grayscale copy.
