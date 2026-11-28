@@ -2,11 +2,13 @@
 //! that the Active Region follows. It exists while a World is open.
 //!
 //! Controls, while input is gameplay input (`crate::input_policy`): the mouse looks around, as
-//! fast as the player's mouse sensitivity says. The movement actions move, Jump jumps, and F
-//! switches flying on and off. Flying goes through solids; Jump rises and Fly down sinks. In a
-//! liquid, holding Jump swims upward. The actions are bound in Settings (`crate::settings`), by
-//! default to WASD, Space and Shift. While Alt is held, the body takes no input but still falls,
-//! swims and slides; while the World is paused, it doesn't move at all.
+//! fast as the player's mouse sensitivity says. The movement actions move, Jump jumps, Run runs
+//! and Sneak sneaks ([`movement`]). Pressing Jump twice quickly switches flying on and off
+//! ([`flight`]). Flying goes through solids; Jump rises and Fly down sinks. In a liquid, holding
+//! Jump swims upward, and climbs out onto a bank. The view widens while running ([`view`]). The
+//! actions are bound in Settings (`crate::settings`), by default to WASD, Space, Ctrl and Shift:
+//! Shift sneaks on foot and flies down in flight. While Alt is held, the body takes no input but
+//! still falls, swims and slides; while the World is paused, it doesn't move at all.
 //!
 //! A World opened without a player spawns them on the ground below the focus ([`ground_below`]).
 //! A saved World's player carries on exactly as saved: where they were, looking the same way,
@@ -15,8 +17,10 @@
 //! until the Chunks around them have loaded.
 
 pub mod collision;
+pub mod flight;
 pub mod movement;
 pub mod raycast;
+pub mod view;
 
 use std::f32::consts::FRAC_PI_2;
 
@@ -27,18 +31,16 @@ use sim::{CHUNK_SIZE, CellPos, ChunkPos, Phase, WORLD_BOTTOM_Y, WORLD_TOP_Y};
 
 use crate::input_policy::{InputPolicy, gameplay_input};
 use crate::session::{Play, PlayerStart, Session, SessionSystems};
-use crate::settings::{Action, ActionInput, Settings};
+use crate::settings::{Action, ActionInput, Bindings, Settings};
 use crate::sim_bridge::{Elements, RENDER_DISTANCE, SimFocus};
-use crate::world::WorldView;
-use movement::{Body, MoveInput, MoveMode, advance};
+use crate::world::{WorldView, capacity_grams, liquid_fill};
+use flight::{FlightToggle, JumpFrame};
+use movement::{Body, Gait, Matter, MoveInput, MoveMode, advance, gait, swimming};
+use view::{FIELD_OF_VIEW, RunView};
 
 /// How far the view turns per pixel the mouse moves at a mouse sensitivity of 1, in radians: about
 /// a tenth of a degree.
 pub const LOOK_SPEED: f32 = 0.002;
-
-/// Switches flying on and off. Fixed until step 21 moves flying to a double press of Jump: Settings
-/// can't rebind it, or bind anything else to it (`crate::settings::FIXED_SHORTCUTS`).
-pub const FLY_KEY: KeyCode = KeyCode::KeyF;
 
 /// How far the view may tilt up or down: just short of straight up and down, where yaw would
 /// become ambiguous.
@@ -47,9 +49,6 @@ const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
 /// The longest step of time a single frame moves the body through, in seconds. After a stall,
 /// the body moves less than the time that passed, rather than one long, sudden step.
 const MAX_FRAME_STEP: f32 = 0.1;
-
-/// The vertical field of view, in degrees.
-const FIELD_OF_VIEW: f32 = 70.0;
 
 /// The player: a first-person camera at the eyes of a body that moves through the world, and the
 /// Active Region's focus. Needs the session, the input policy and the sim bridge.
@@ -73,7 +72,9 @@ impl Plugin for PlayerPlugin {
                 .chain()
                 .in_set(PlayerSystems)
                 .run_if(in_state(Play::Running)),
-        );
+        )
+        // Pausing, leaving the World or closing it forgets a first press of Jump.
+        .add_systems(OnExit(Play::Running), forget_jump_presses);
     }
 }
 
@@ -119,6 +120,8 @@ fn spawn_player(mut commands: Commands, start: Res<PlayerStart>, focus: Res<SimF
     commands.spawn((
         Player(body),
         awaiting,
+        FlightToggle::default(),
+        RunView::default(),
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
             fov: FIELD_OF_VIEW.to_radians(),
@@ -241,37 +244,95 @@ fn look_around(
 }
 
 /// Moves the body as the controls say, through the world as the game last heard it from the
-/// simulation, and keeps the camera at its eyes. Without gameplay input, the body moves as if no
-/// control were held.
+/// simulation, and keeps the camera at its eyes. Two quick presses of Jump switch flying first.
+/// Without gameplay input, the body moves as if no control were held. The view widens while the
+/// body runs, and narrows again after.
 fn move_player(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    real_time: Res<Time<Real>>,
     actions: ActionInput,
     policy: Res<InputPolicy>,
     view: Res<WorldView>,
     elements: Res<Elements>,
-    player: Single<(&mut Player, &mut Transform), Without<AwaitingSpawn>>,
+    player: Single<
+        (
+            &mut Player,
+            &mut FlightToggle,
+            &mut RunView,
+            &mut Transform,
+            &mut Projection,
+        ),
+        Without<AwaitingSpawn>,
+    >,
 ) {
-    let (mut player, mut transform) = player.into_inner();
+    let (mut player, mut toggle, mut run_view, mut transform, mut projection) =
+        player.into_inner();
+    let matter_at = |cell: IVec3| matter_in(&view, &elements, cell);
+    let jump = JumpFrame {
+        now: real_time.elapsed(),
+        bound: actions.bindings().inputs(Action::Jump),
+        pressed: actions.just_pressed(Action::Jump),
+        held: actions.pressed(Action::Jump),
+        gameplay: policy.gameplay,
+        swimming: swimming(&player, matter_at),
+    };
+    if toggle.read(jump) {
+        player.mode = player.mode.toggled();
+        player.velocity = Vec3::ZERO;
+        info!("flying: {}", player.mode == MoveMode::Fly);
+    }
     let input = if policy.gameplay {
-        if keys.just_pressed(FLY_KEY) {
-            player.mode = player.mode.toggled();
-            player.velocity = Vec3::ZERO;
-            info!("flying: {}", player.mode == MoveMode::Fly);
-        }
         move_input(&actions, &transform)
     } else {
         MoveInput::default()
     };
 
-    let phase_at = |cell: IVec3| match view.cell(CellPos::new(cell.x, cell.y, cell.z)) {
-        Some(cell) => elements.get(cell.element).phase,
-        // A Chunk that isn't loaded is solid, so the body can't fall into unloaded space.
-        None => Phase::Solid,
-    };
     let dt = time.delta_secs().min(MAX_FRAME_STEP);
-    **player = advance(**player, input, dt, phase_at);
+    run_view.update(gait(&player, &input, matter_at) == Gait::Run, dt);
+    show_field_of_view(&mut projection, run_view.field_of_view());
+    **player = advance(**player, input, dt, matter_at);
     transform.translation = player.eyes();
+}
+
+/// What the body meets in the Cell at `cell`. A liquid's surface stands as high as the fluid
+/// meshes draw it. A Cell whose Chunk isn't loaded is solid, so the body can't fall into unloaded
+/// space.
+fn matter_in(view: &WorldView, elements: &Elements, cell: IVec3) -> Matter {
+    let pos = CellPos::new(cell.x, cell.y, cell.z);
+    let Some(here) = view.cell(pos) else {
+        return Matter::Solid;
+    };
+    let element = elements.get(here.element);
+    match element.phase {
+        Phase::Solid => Matter::Solid,
+        Phase::Liquid => {
+            let above = view.cell(CellPos::new(cell.x, cell.y + 1, cell.z));
+            let same_above = above.is_some_and(|above| above.element == here.element);
+            Matter::Liquid {
+                fill: liquid_fill(here.mass_grams, capacity_grams(element), same_above),
+            }
+        }
+        Phase::Gas | Phase::Vacuum => Matter::Open,
+    }
+}
+
+/// Sets the camera's vertical field of view to `degrees`, marking the projection changed only if
+/// it does change.
+fn show_field_of_view(projection: &mut Mut<Projection>, degrees: f32) {
+    let fov = degrees.to_radians();
+    if let Projection::Perspective(perspective) = projection.bypass_change_detection()
+        && perspective.fov != fov
+    {
+        perspective.fov = fov;
+        projection.set_changed();
+    }
+}
+
+/// Forgets a first press of Jump, as the World stops running.
+fn forget_jump_presses(mut toggles: Query<&mut FlightToggle>) {
+    for mut toggle in &mut toggles {
+        toggle.reset();
+    }
 }
 
 /// What the controls held ask of the body, which faces as `transform` does.
@@ -288,6 +349,25 @@ fn move_input(actions: &ActionInput, transform: &Transform) -> MoveInput {
         direction: direction.normalize_or_zero(),
         up: actions.pressed(Action::Jump),
         down: actions.pressed(Action::Descend),
+        run: actions.pressed(Action::Run),
+        sneak: actions.pressed(Action::Sneak),
+    }
+}
+
+/// How to switch flying on and off, as the Settings page says it: "Press Space twice quickly to
+/// switch flying on and off."
+pub fn flight_hint(bindings: &Bindings) -> String {
+    let action = Action::Jump;
+    if bindings.inputs(action).is_empty() {
+        format!(
+            "“{}” is unbound, so flying can't be switched on. Bind it in Settings.",
+            action.label()
+        )
+    } else {
+        format!(
+            "Press {} twice quickly to switch flying on and off.",
+            bindings.label(action)
+        )
     }
 }
 

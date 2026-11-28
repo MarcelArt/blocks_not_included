@@ -1,9 +1,9 @@
 //! Turns a Chunk's liquid Cells, and its gas Cells whose Element has a tint, into translucent
 //! meshes.
 //!
-//! Each liquid Cell is drawn as a box whose top shows how full it is: it reaches Mass / Capacity
-//! of the way up the Cell, kept between [`MIN_SURFACE`] and 1, or all the way under more of the
-//! same liquid. A face is left out where the box meets more of the same liquid or a solid, except
+//! Each liquid Cell is drawn as a box whose top shows how full it is, as [`liquid_fill`] says: it
+//! reaches Mass / Capacity of the way up the Cell, kept between `MIN_SURFACE` and 1, or all the
+//! way under more of the same liquid. The player swims in the same surface. A face is left out where the box meets more of the same liquid or a solid, except
 //! for the part of a side that rises above a lower neighbour's surface. A tinted gas Cell shows a
 //! face wherever it borders a different Element that isn't solid.
 //!
@@ -12,12 +12,10 @@
 use sim::{Cell, ElementId, ElementTable, Phase};
 
 use super::mesher::{ChunkGeometry, ChunkNeighbourhood, chunk_local};
+use crate::world::{capacity_grams, liquid_fill};
 
 /// How opaque a liquid is drawn.
 pub const LIQUID_ALPHA: f32 = 0.6;
-
-/// The lowest a liquid's surface is drawn within its Cell, so that a thin film stays visible.
-pub const MIN_SURFACE: f32 = 0.05;
 
 /// How a Cell of each Element takes part in drawing fluids.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,8 +56,7 @@ impl FluidLooks {
                     Phase::Solid => Look::Solid,
                     Phase::Liquid => Look::Liquid {
                         color: [r, g, b, LIQUID_ALPHA],
-                        // kg/m³ × 1 m³ × 1000 g/kg. Density is above 0 in a valid table.
-                        capacity_grams: (element.density * 1_000.0).max(1.0),
+                        capacity_grams: capacity_grams(element),
                     },
                     Phase::Gas if element.tint > 0.0 => Look::TintedGas {
                         color: [r, g, b, element.tint],
@@ -182,14 +179,12 @@ impl Around<'_> {
     /// How high the liquid at `pos`, this Cell or a neighbour holding the same liquid, is drawn
     /// within its Cell, from 0 to 1.
     fn surface(&self, pos: [i32; 3], capacity_grams: f32) -> f32 {
-        if self.is_same(self.neighbourhood.cell(Facing::UP.step(pos))) {
-            return 1.0;
-        }
         let mass_grams = self
             .neighbourhood
             .cell(pos)
             .map_or(0, |cell| cell.mass_grams);
-        (mass_grams as f32 / capacity_grams).clamp(MIN_SURFACE, 1.0)
+        let same_above = self.is_same(self.neighbourhood.cell(Facing::UP.step(pos)));
+        liquid_fill(mass_grams, capacity_grams, same_above)
     }
 
     /// The neighbouring Cell `facing` points to, if it is known.

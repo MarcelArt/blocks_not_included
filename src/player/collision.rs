@@ -72,6 +72,23 @@ pub fn move_and_collide(aabb: Aabb, delta: Vec3, is_solid: impl Fn(IVec3) -> boo
     }
 }
 
+/// The Cells, along one axis, that a box from `min` to `max` along it reaches into by more than
+/// the skin.
+pub(crate) fn overlapped_cells(min: f32, max: f32) -> std::ops::RangeInclusive<i32> {
+    let first = (min + SKIN).floor() as i32;
+    let last = (max - SKIN).ceil() as i32 - 1;
+    first..=last
+}
+
+/// Whether `aabb` reaches into no Cell for which `is_solid` holds, beyond the skin.
+pub fn is_clear(aabb: Aabb, is_solid: impl Fn(IVec3) -> bool) -> bool {
+    overlapped_cells(aabb.min.x, aabb.max.x).all(|x| {
+        overlapped_cells(aabb.min.y, aabb.max.y).all(|y| {
+            overlapped_cells(aabb.min.z, aabb.max.z).all(|z| !is_solid(IVec3::new(x, y, z)))
+        })
+    })
+}
+
 /// The face of the nearest solid Cell that `aabb` would meet moving `distance` along `axis`, if
 /// any: the position, along `axis`, where its leading face must stop.
 fn first_solid_face(
@@ -82,11 +99,7 @@ fn first_solid_face(
 ) -> Option<f32> {
     let [across, along] = [(axis + 1) % 3, (axis + 2) % 3];
     // The Cells the box overlaps along the other two axes, by more than the skin.
-    let overlapped = |other: usize| {
-        let first = (aabb.min[other] + SKIN).floor() as i32;
-        let last = (aabb.max[other] - SKIN).ceil() as i32 - 1;
-        first..=last
-    };
+    let overlapped = |other: usize| overlapped_cells(aabb.min[other], aabb.max[other]);
     let layer_is_solid = |layer: i32| {
         overlapped(across).any(|a| {
             overlapped(along).any(|b| {

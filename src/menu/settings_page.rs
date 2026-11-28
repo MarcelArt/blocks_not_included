@@ -9,7 +9,7 @@ use bevy_egui::{EguiContexts, egui};
 use super::{busy_text, button_row, error_text};
 use crate::debug_panel::{CLOCK_KEY, PANEL_KEY, STEP_KEY};
 use crate::input_policy::PAUSE_KEY;
-use crate::player::FLY_KEY;
+use crate::player::flight_hint;
 use crate::session::Session;
 use crate::settings::{
     Action, AutosaveInterval, DisplayMode, Input, Rebinding, SENSITIVITY_RANGE, Settings,
@@ -33,6 +33,8 @@ const CONTROL_GROUPS: [(&str, &[Action]); 3] = [
             Action::MoveLeft,
             Action::MoveRight,
             Action::Jump,
+            Action::Run,
+            Action::Sneak,
             Action::Descend,
         ],
     ),
@@ -224,15 +226,18 @@ fn controls_section(ui: &mut egui::Ui, editor: &mut SettingsEditor) {
     if let Some(action) = listen {
         editor.listen(action);
     }
+    ui.weak(format!(
+        "{} Sneak and Fly down may share a key: one is on foot, the other in flight.",
+        flight_hint(&editor.draft.bindings)
+    ));
     let key = |key: KeyCode| Input::Key(key).label();
     ui.weak(format!(
-        "{} pauses and Alt frees the cursor. {} shows the debug panel, {} and {} run its clock, \
-         and {} switches flying on and off: these keys can't be changed.",
+        "{} pauses and Alt frees the cursor. {} shows the debug panel, and {} and {} run its \
+         clock: these keys can't be changed.",
         key(PAUSE_KEY),
         key(PANEL_KEY),
         key(CLOCK_KEY),
         key(STEP_KEY),
-        key(FLY_KEY),
     ));
 }
 

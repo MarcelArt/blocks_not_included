@@ -155,6 +155,13 @@ The workspace uses **Bevy 0.20.1**, released in October 2026. Most tutorials and
 - **egui 0.36.** `egui::ComboBox::from_id_salt(id).selected_text(…).width(w).show_ui(ui, …)`; `Slider::logarithmic(true)`; `Button::selected(bool)` highlights a button; `ui.visuals().warn_fg_color`.
 - **RON** (0.12). `ron::value::RawValue` defers parsing one value: deserialize `Option<Box<RawValue>>`, then `raw.into_rust::<T>()`. A plain `Option<T>` field expects `Some(…)` in the text, so parse with `ron::Options::default().with_default_extension(Extensions::IMPLICIT_SOME)`. `PrettyConfig::new().depth_limit(2)` keeps each binding on one line.
 
+## Found in step 21
+
+- **glam's `BVec3`** can't be indexed: `blocked.test(axis)` reads one axis.
+- **Changing a component only when its value changes.** `Mut::bypass_change_detection()` gives the value without marking it changed. Call `set_changed()` after an actual change. `move_player` sets `Projection`'s field of view this way every frame.
+- **Agent checks in a real window.** A harness in `PreUpdate` that sets `Window::focused = true` before the input policy runs keeps gameplay input on in a window without focus.
+- **Mutation testing with cargo.** Cargo decides what to rebuild by modification time. Restoring a mutated file from a backup copied before the mutation gives it an older time than the last build, so cargo keeps the mutated build. Touch the file after restoring it.
+
 ## Threads and tasks
 
 - On this 8-thread laptop, Bevy's defaults are 4 compute threads, 2 async-compute threads and 2 IO threads. The sim runs on its own thread (ADR 0003) with its own sized pool (step 08), so leave Bevy's pools at their defaults unless you have a measurement that says otherwise.

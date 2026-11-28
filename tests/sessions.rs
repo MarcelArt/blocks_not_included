@@ -18,6 +18,7 @@ use bevy::input::mouse::MouseButtonInput;
 use bevy::input::{ButtonState, InputPlugin};
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
+use bevy::time::TimeUpdateStrategy;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::input::EguiWantsInput;
 use blocks_not_included::debug_panel::{DebugPanelPlugin, SimClock};
@@ -789,4 +790,111 @@ fn a_loaded_world_keeps_its_saved_rules_until_a_file_changes_during_play() {
     });
     assert_eq!(outcomes(&app), [ReplaceOutcome::Settings(Ok(()))]);
     assert_eq!(capture(&app).settings.conduction_multiplier, 4.0);
+}
+
+/// Step 21 (`docs/plans/21-movement-controls.md`): in the game, two presses of Jump switch flying
+/// on and off, and F no longer does. A first press is forgotten over a pause, or while Alt is
+/// held. In flight Jump rises and Shift flies down. On foot, Ctrl widens the view while running,
+/// without moving the camera from the body's eyes, and the view narrows again once running stops.
+#[test]
+fn jump_pressed_twice_switches_flying_and_running_widens_the_view() {
+    let mut app = session_app();
+    open(&mut app, new_world(None));
+    update_until(&mut app, "the player stands on the ground", |app| {
+        player(app).is_some_and(|(body, _, awaiting)| awaiting.is_none() && body.grounded)
+    });
+    let body = |app: &mut App| player(app).expect("the player").0;
+    let clock = |app: &mut App, ms: u64| {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(ms)));
+    };
+    // Frames of 20 ms on the app's clocks.
+    clock(&mut app, 20);
+
+    tap(&mut app, KeyCode::KeyF);
+    tap(&mut app, KeyCode::KeyF);
+    assert_eq!(body(&mut app).mode, MoveMode::Walk, "F no longer flies");
+
+    // Two taps of Space, 40 ms apart: the first jumps, and the second flies.
+    tap(&mut app, KeyCode::Space);
+    tap(&mut app, KeyCode::Space);
+    assert_eq!(body(&mut app).mode, MoveMode::Fly);
+
+    // Space rises, and Shift flies down: 12 m/s for 10 frames, then for 5.
+    let hovering = body(&mut app).feet.y;
+    for (held, frames, rise) in [(KeyCode::Space, 10, 2.4), (KeyCode::ShiftLeft, 5, -1.2)] {
+        let from = body(&mut app).feet.y;
+        key(&mut app, held, ButtonState::Pressed);
+        for _ in 0..frames {
+            app.update();
+        }
+        key(&mut app, held, ButtonState::Released);
+        clock(&mut app, 0);
+        app.update();
+        clock(&mut app, 20);
+        let risen = body(&mut app).feet.y - from;
+        assert!((risen - rise).abs() < 1e-3, "{held:?}: {risen}");
+    }
+    assert!(body(&mut app).feet.y > hovering);
+    // Long enough that the hold of Shift's companion press of Space is forgotten.
+    clock(&mut app, 400);
+    app.update();
+
+    // While the clocks stand still, every press is within 300 ms of the last. A pause between
+    // two forgets the first, and so does holding Alt.
+    clock(&mut app, 0);
+    tap(&mut app, KeyCode::Space);
+    tap(&mut app, KeyCode::Escape);
+    update_until(&mut app, "the World pauses", |app| play(app) == Some(Play::Paused));
+    tap(&mut app, KeyCode::Escape);
+    assert_eq!(play(&app), Some(Play::Running));
+    tap(&mut app, KeyCode::Space);
+    assert_eq!(body(&mut app).mode, MoveMode::Fly, "the pause forgot the first press");
+    clock(&mut app, 400);
+    app.update();
+    clock(&mut app, 0);
+    tap(&mut app, KeyCode::Space);
+    tap(&mut app, KeyCode::AltLeft);
+    tap(&mut app, KeyCode::Space);
+    assert_eq!(body(&mut app).mode, MoveMode::Fly, "Alt forgot the first press");
+
+    // Two more presses land, and the body falls back to the ground.
+    clock(&mut app, 400);
+    app.update();
+    clock(&mut app, 20);
+    tap(&mut app, KeyCode::Space);
+    tap(&mut app, KeyCode::Space);
+    assert_eq!(body(&mut app).mode, MoveMode::Walk);
+    for _ in 0..100 {
+        app.update();
+    }
+    assert!(body(&mut app).grounded);
+
+    // Running: Ctrl and W for 0.5 s widen the view to 76°, then 0.3 s after letting go of W it
+    // is back to 70°. The camera stays at the body's eyes throughout.
+    let view = |app: &mut App| {
+        let (player, transform, projection) = app
+            .world_mut()
+            .query::<(&Player, &Transform, &Projection)>()
+            .single(app.world())
+            .expect("the player's camera");
+        assert_eq!(transform.translation, player.eyes(), "the camera left the eyes");
+        match projection {
+            Projection::Perspective(perspective) => perspective.fov.to_degrees(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!((view(&mut app) - 70.0).abs() < 1e-3);
+    key(&mut app, KeyCode::ControlLeft, ButtonState::Pressed);
+    key(&mut app, KeyCode::KeyW, ButtonState::Pressed);
+    for _ in 0..25 {
+        app.update();
+        view(&mut app);
+    }
+    assert!((view(&mut app) - 76.0).abs() < 1e-3);
+    key(&mut app, KeyCode::KeyW, ButtonState::Released);
+    for _ in 0..15 {
+        app.update();
+        view(&mut app);
+    }
+    assert!((view(&mut app) - 70.0).abs() < 1e-3);
 }

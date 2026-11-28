@@ -5,6 +5,7 @@
 
 use bevy::prelude::{KeyCode, MouseButton};
 use blocks_not_included::overlay::cycle_hint;
+use blocks_not_included::player::flight_hint;
 use blocks_not_included::settings::{
     Action, AutosaveInterval, Bindings, Context, DisplayMode, FIXED_SHORTCUTS, Input, Offered,
     RESERVED_KEYS, Rebinding, Refusal, Settings, SettingsEditor,
@@ -33,6 +34,8 @@ fn the_defaults_bind_every_action_and_conflict_nowhere() {
     let labels: Vec<(Action, String)> = [
         Action::MoveForward,
         Action::Jump,
+        Action::Run,
+        Action::Sneak,
         Action::Descend,
         Action::ChooseDig,
         Action::Dig,
@@ -47,7 +50,9 @@ fn the_defaults_bind_every_action_and_conflict_nowhere() {
         [
             (Action::MoveForward, "W".to_owned()),
             (Action::Jump, "Space".to_owned()),
-            // Both Shift keys, named as one.
+            // Both Ctrl keys, and both Shift keys, each named as one.
+            (Action::Run, "Ctrl".to_owned()),
+            (Action::Sneak, "Shift".to_owned()),
             (Action::Descend, "Shift".to_owned()),
             (Action::ChooseDig, "1".to_owned()),
             (Action::Dig, "Left Mouse".to_owned()),
@@ -90,8 +95,8 @@ fn esc_alt_and_the_fixed_shortcuts_are_refused_and_the_editor_keeps_listening() 
     let fixed: Vec<KeyCode> = FIXED_SHORTCUTS.iter().map(|(code, _)| *code).collect();
     assert_eq!(
         fixed,
-        [KeyCode::F3, KeyCode::KeyP, KeyCode::KeyN, KeyCode::KeyF],
-        "the debug panel, its clock and step, and flying"
+        [KeyCode::F3, KeyCode::KeyP, KeyCode::KeyN],
+        "the debug panel, its clock and step"
     );
     assert_eq!(editor.draft, Settings::default(), "nothing was bound");
     assert_eq!(
@@ -105,6 +110,11 @@ fn esc_alt_and_the_fixed_shortcuts_are_refused_and_the_editor_keeps_listening() 
     assert_eq!(editor.offer(key(KeyCode::KeyJ)), Offered::Bound);
     assert_eq!(editor.draft.bindings.inputs(Action::Jump), [key(KeyCode::KeyJ)]);
     assert_eq!(*editor.rebinding(), Rebinding::Idle);
+
+    // F no longer switches flying, which two presses of Jump do: it can be bound.
+    assert_eq!(Refusal::of(key(KeyCode::KeyF)), None);
+    editor.listen(Action::CycleOverlay);
+    assert_eq!(editor.offer(key(KeyCode::KeyF)), Offered::Bound);
 }
 
 #[test]
@@ -177,11 +187,32 @@ fn actions_that_never_apply_at_once_may_share_an_input() {
     // In flight with Dig in hand, both apply.
     assert!(Context::flying().overlaps(Context::holding(Tool::Dig)));
     assert_eq!(Action::Descend.context(), Context::flying());
+
+    // By default, Sneak on foot and Fly down in flight share Shift.
+    assert_eq!(Action::Sneak.context(), Context::walking());
+    assert_eq!(Action::Run.context(), Context::walking());
+    let bindings = Bindings::default();
+    assert_eq!(bindings.inputs(Action::Sneak), bindings.inputs(Action::Descend));
+    let mut editor = fresh_editor();
+    editor.listen(Action::Descend);
+    assert_eq!(editor.offer(key(KeyCode::KeyC)), Offered::Bound);
+    editor.listen(Action::Descend);
+    assert_eq!(editor.offer(key(KeyCode::ShiftRight)), Offered::Bound, "Shift again");
+
+    // Run and Sneak both apply on foot, so they can't share one.
+    editor.listen(Action::Sneak);
+    assert_eq!(editor.offer(key(KeyCode::ControlLeft)), Offered::Conflict);
+    let Rebinding::Conflict { taken_from, .. } = editor.rebinding() else {
+        panic!("a conflict");
+    };
+    assert_eq!(*taken_from, [Action::Run]);
 }
 
 #[test]
 fn either_shift_ctrl_or_system_key_binds_both() {
     let mut editor = fresh_editor();
+    // Run has Ctrl by default; unbound, Ctrl is free.
+    editor.draft.bindings.set(Action::Run, Vec::new());
     editor.listen(Action::CycleOverlay);
     assert_eq!(editor.offer(key(KeyCode::ControlRight)), Offered::Bound);
     let bindings = &editor.draft.bindings;
@@ -259,6 +290,10 @@ fn the_hints_name_the_controls_as_bound() {
         "Hold Left Mouse to heat the Cells around the one in view. Below 0 K/s it cools them."
     );
     assert_eq!(cycle_hint(&bindings), "O cycles the Overlays.");
+    assert_eq!(
+        flight_hint(&bindings),
+        "Press Space twice quickly to switch flying on and off."
+    );
 
     bindings.set(Action::Dig, vec![key(KeyCode::KeyG)]);
     bindings.set(Action::Place, vec![mouse(MouseButton::Back)]);
@@ -269,6 +304,11 @@ fn the_hints_name_the_controls_as_bound() {
         "Mouse 4 places it against the face in view."
     );
     assert_eq!(cycle_hint(&bindings), "Tab cycles the Overlays.");
+    bindings.set(Action::Jump, vec![key(KeyCode::KeyJ), mouse(MouseButton::Forward)]);
+    assert_eq!(
+        flight_hint(&bindings),
+        "Press J or Mouse 5 twice quickly to switch flying on and off."
+    );
 
     bindings.set(Action::SpawnFluid, Vec::new());
     bindings.set(Action::CycleOverlay, Vec::new());
@@ -279,5 +319,10 @@ fn the_hints_name_the_controls_as_bound() {
     assert_eq!(
         cycle_hint(&bindings),
         "“Cycle the Overlays” is unbound. Bind it in Settings."
+    );
+    bindings.set(Action::Jump, Vec::new());
+    assert_eq!(
+        flight_hint(&bindings),
+        "“Jump, swim up, fly up” is unbound, so flying can't be switched on. Bind it in Settings."
     );
 }

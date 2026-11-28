@@ -8,12 +8,12 @@
 //! Each action applies in a [`Context`]: in which movement modes, and with which god tool in hand.
 //! Two actions conflict when they share an input and their contexts overlap, so that one press
 //! would do both. Actions that never apply at once may share an input. By default, Dig and the
-//! heat brush share the left mouse button, as only one tool is ever in hand, and an action used
-//! only in flight may share a key with one used only on foot.
+//! heat brush share the left mouse button, as only one tool is ever in hand, and Fly down, used
+//! only in flight, shares Shift with Sneak, used only on foot.
 //!
 //! Some keys can't be bound at all. Esc pauses and Alt frees the cursor ([`RESERVED_KEYS`]). The
-//! debug panel's keys, and F for flying, keep their keys too ([`FIXED_SHORTCUTS`]): they work in
-//! every context, so any action bound to one would conflict with it.
+//! debug panel's keys keep their keys too ([`FIXED_SHORTCUTS`]): they work in every context, so
+//! any action bound to one would conflict with it.
 
 use std::fmt;
 
@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use super::Settings;
 use crate::debug_panel;
 use crate::input_policy::{FREE_CURSOR_KEYS, PAUSE_KEY};
-use crate::player::FLY_KEY;
 use crate::player::movement::MoveMode;
 use crate::tools::Tool;
 
@@ -165,8 +164,12 @@ pub enum Action {
     MoveBack,
     MoveLeft,
     MoveRight,
-    /// Jumps, swims upward, or flies upward.
+    /// Jumps, swims upward, or flies upward. Pressed twice quickly, it switches flying on and off.
     Jump,
+    /// Runs, on foot, while held.
+    Run,
+    /// Sneaks, on the ground, while held: slower, and never off a ledge.
+    Sneak,
     /// Flies downward.
     Descend,
     CycleOverlay,
@@ -186,12 +189,14 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order Settings lists them.
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 17] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
         Action::MoveRight,
         Action::Jump,
+        Action::Run,
+        Action::Sneak,
         Action::Descend,
         Action::ChooseDig,
         Action::ChoosePlace,
@@ -232,6 +237,8 @@ impl Action {
             Action::MoveLeft => "move_left",
             Action::MoveRight => "move_right",
             Action::Jump => "jump",
+            Action::Run => "run",
+            Action::Sneak => "sneak",
             Action::Descend => "descend",
             Action::CycleOverlay => "cycle_overlay",
             Action::ChooseDig => "choose_dig",
@@ -258,6 +265,8 @@ impl Action {
             Action::MoveLeft => "Move left",
             Action::MoveRight => "Move right",
             Action::Jump => "Jump, swim up, fly up",
+            Action::Run => "Run",
+            Action::Sneak => "Sneak",
             Action::Descend => "Fly down",
             Action::CycleOverlay => "Cycle the Overlays",
             Action::ChooseDig => "Choose Dig",
@@ -275,6 +284,7 @@ impl Action {
     pub fn context(self) -> Context {
         match self {
             Action::Descend => Context::flying(),
+            Action::Run | Action::Sneak => Context::walking(),
             Action::Dig => Context::holding(Tool::Dig),
             Action::Place => Context::holding(Tool::Place),
             Action::HeatBrush => Context::holding(Tool::HeatBrush),
@@ -301,7 +311,8 @@ impl Action {
             Action::MoveLeft => key(KeyCode::KeyA),
             Action::MoveRight => key(KeyCode::KeyD),
             Action::Jump => key(KeyCode::Space),
-            Action::Descend => Input::Key(KeyCode::ShiftLeft).with_twin(),
+            Action::Run => Input::Key(KeyCode::ControlLeft).with_twin(),
+            Action::Sneak | Action::Descend => Input::Key(KeyCode::ShiftLeft).with_twin(),
             Action::CycleOverlay => key(KeyCode::KeyO),
             Action::ChooseDig => key(KeyCode::Digit1),
             Action::ChoosePlace => key(KeyCode::Digit2),
@@ -379,13 +390,11 @@ pub const RESERVED_KEYS: [(KeyCode, &str); 3] = [
     (FREE_CURSOR_KEYS[1], "freeing the cursor"),
 ];
 
-/// Shortcuts whose keys can't be rebound or bound to anything else: the debug panel's, and
-/// flying's until step 21 moves it to Jump.
-pub const FIXED_SHORTCUTS: [(KeyCode, &str); 4] = [
+/// Shortcuts whose keys can't be rebound or bound to anything else: the debug panel's.
+pub const FIXED_SHORTCUTS: [(KeyCode, &str); 3] = [
     (debug_panel::PANEL_KEY, "showing the debug panel"),
     (debug_panel::CLOCK_KEY, "stopping and starting the debug clock"),
     (debug_panel::STEP_KEY, "running one Tick of the debug clock"),
-    (FLY_KEY, "switching flying on and off"),
 ];
 
 /// Why an input can't be bound to anything.
