@@ -74,7 +74,19 @@ pub(crate) fn neighbours(pos: ChunkPos) -> [ChunkPos; 26] {
 /// The colour each solid Element is drawn in, by [`ElementId::index`]. Every other Element is
 /// `None`, so this also says which Cells are meshed here.
 #[derive(Clone, Debug)]
-pub struct SolidColors(Vec<Option<[f32; 4]>>);
+pub struct SolidColors(Vec<Option<FaceLook>>);
+
+#[derive(Clone, Copy, Debug)]
+struct FaceLook {
+    color: [f32; 4],
+    band: Option<usize>,
+}
+
+// The atlas repeats horizontally. Each vertical band holds a Chunk's worth
+// of repeats plus one wrap tile at each end for samples right on an edge.
+// A final white tile preserves the Element colour for untextured solids.
+const BAND_HEIGHT: usize = CHUNK_SIZE + 2;
+const ATLAS_HEIGHT: usize = 4 * BAND_HEIGHT + 1;
 
 impl SolidColors {
     pub fn new(elements: &ElementTable) -> Self {
@@ -82,7 +94,12 @@ impl SolidColors {
             .iter()
             .map(|(_, element)| {
                 let [r, g, b] = element.color;
-                (element.phase == Phase::Solid).then_some([r, g, b, 1.0])
+                (element.phase == Phase::Solid).then(|| FaceLook {
+                    color: [r, g, b, 1.0],
+                    band: ["Dirt", "Granite", "Ice", "Igneous Rock"]
+                        .iter()
+                        .position(|&name| name == element.name),
+                })
             })
             .collect();
         Self(colors)
@@ -98,8 +115,8 @@ impl SolidColors {
         }
     }
 
-    /// The colour of the solid Element whose mesher value is `voxel`.
-    fn of_voxel(&self, voxel: u16) -> [f32; 4] {
+    /// The colour and texture of the solid Element whose mesher value is `voxel`.
+    fn of_voxel(&self, voxel: u16) -> FaceLook {
         self.0
             .get(usize::from(voxel) - 1)
             .copied()
@@ -174,6 +191,7 @@ pub struct ChunkGeometry {
     /// Linear RGBA.
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
+    uvs: Vec<[f32; 2]>,
 }
 
 /// Meshes the solid Cells of a Chunk. Faces between two solid Cells are left out, and so are
@@ -208,7 +226,14 @@ pub fn mesh_greedy(
     color: impl Fn(u16) -> [f32; 4],
 ) -> ChunkGeometry {
     match greedy_quads(neighbourhood, voxel, faces) {
-        Some((_, quads)) => ChunkGeometry::from_quads(&quads, color, None),
+        Some((_, quads)) => ChunkGeometry::from_quads(
+            &quads,
+            |voxel| FaceLook {
+                color: color(voxel),
+                band: None,
+            },
+            None,
+        ),
         None => ChunkGeometry::default(),
     }
 }
@@ -244,22 +269,26 @@ impl ChunkGeometry {
 
     /// A mesh for the GPU alone: the main world drops its copy once uploaded.
     pub fn into_mesh(self) -> Mesh {
-        Mesh::new(
+        let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::RENDER_WORLD,
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
-        .with_inserted_indices(Indices::U32(self.indices))
+        .with_inserted_indices(Indices::U32(self.indices));
+        if !self.uvs.is_empty() {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        }
+        mesh
     }
 
-    /// `quads` lists the mesher's quads for each face direction, in [`Face`] order. `color` gives
-    /// the colour of a quad's value. With `occluders`, each corner is darkened by the solid Cells
+    /// `quads` lists the mesher's quads for each face direction, in [`Face`] order. `look` gives
+    /// the colour and texture of a quad's value. With `occluders`, each corner is darkened by the solid Cells
     /// around it in front of its face, and a quad is split where that changes across it.
     fn from_quads(
         quads: &[Vec<Quad>; 6],
-        color: impl Fn(u16) -> [f32; 4],
+        look: impl Fn(u16) -> FaceLook,
         occluders: Option<&Occluders>,
     ) -> Self {
         let count = quads.iter().map(Vec::len).sum::<usize>();
@@ -268,16 +297,30 @@ impl ChunkGeometry {
             normals: Vec::with_capacity(count * 4),
             colors: Vec::with_capacity(count * 4),
             indices: Vec::with_capacity(count * 6),
+            uvs: Vec::new(),
         };
         let mut scratch = Scratch::default();
         for (face, quads) in (0..6).map(Face::from).zip(quads) {
             let side = Side::of(face);
             for &quad in quads {
                 let voxel = u16::try_from(quad.voxel_id()).expect("values are u16");
-                let color = color(voxel);
+                let FaceLook { color, band } = look(voxel);
                 let rect = side.rect(face.vertices_packed(quad));
                 match occluders {
-                    Some(occluders) => geometry.push_occluded(rect, color, occluders, &mut scratch),
+                    Some(occluders) => {
+                        let start = geometry.positions.len();
+                        geometry.push_occluded(rect, color, occluders, &mut scratch);
+                        let [u, v] = side.along();
+                        geometry
+                            .uvs
+                            .extend(geometry.positions[start..].iter().map(|p| {
+                                let row = match band {
+                                    Some(band) => (band * BAND_HEIGHT + 1) as f32 + p[v],
+                                    None => ATLAS_HEIGHT as f32 - 0.5,
+                                };
+                                [p[u], row / ATLAS_HEIGHT as f32]
+                            }));
+                    }
                     None => geometry.push_rect(rect, color, [UNOCCLUDED; 4]),
                 }
             }
@@ -706,6 +749,86 @@ mod tests {
         ShadedQuad, World, elements, expected_quads, expected_shaded_quad, origin_neighbourhood,
         quads_of, shaded_quads, world,
     };
+
+    #[test]
+    fn solid_faces_repeat_once_per_metre_across_chunk_borders() {
+        let cells: Vec<_> = (30..35)
+            .map(|x| (CellPos::new(x, 4, 7), "Granite"))
+            .collect();
+        let world = world(&cells);
+        for x in [0, 1] {
+            let chunk =
+                ChunkNeighbourhood::gather(ChunkPos::new(x, 0, 0), |pos| world.get(&pos).cloned())
+                    .unwrap();
+            let mesh = mesh_solids(&chunk, &SolidColors::new(&elements())).into_mesh();
+            let bevy::mesh::VertexAttributeValues::Float32x2(uvs) =
+                mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap()
+            else {
+                panic!("expected UV coordinates")
+            };
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            let normals = mesh
+                .attribute(Mesh::ATTRIBUTE_NORMAL)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            // Each Chunk has four merged sides and one end cap.
+            assert_eq!(uvs.len(), 20);
+            for ((uv, &[x, y, z]), normal) in uvs.iter().zip(positions).zip(normals) {
+                let expected = if normal[0] != 0.0 {
+                    [y, z]
+                } else if normal[1] != 0.0 {
+                    [z, x]
+                } else {
+                    [x, y]
+                };
+                // Granite begins after 34 Dirt tiles and its first wrap tile.
+                assert_eq!(uv[0], expected[0]);
+                assert!((uv[1] * 137.0 - 35.0 - expected[1]).abs() < 0.00001);
+            }
+        }
+    }
+
+    #[test]
+    fn a_remesh_uses_element_identity_and_preserves_untextured_colours() {
+        let world = world(&[(CellPos::new(5, 6, 7), "Granite")]);
+        let chunk = origin_neighbourhood(&world);
+        // Reuse the same Cell (Element index 1) with each replacement table.
+        for (name, first_row) in [
+            ("Dirt", 1),
+            ("Granite", 35),
+            ("Ice", 69),
+            ("Igneous Rock", 103),
+            ("Quartz", 0),
+        ] {
+            let mut table = ElementTable::new();
+            table.add(sim::Element::new(name).color([0.4, 0.3, 0.7]));
+            let mesh = mesh_solids(&chunk, &SolidColors::new(&table));
+            assert_eq!(mesh.uvs.len(), 24);
+            for ((uv, position), normal) in mesh.uvs.iter().zip(&mesh.positions).zip(&mesh.normals)
+            {
+                let v = if normal[0] != 0.0 {
+                    position[2]
+                } else if normal[1] != 0.0 {
+                    position[0]
+                } else {
+                    position[1]
+                };
+                // The white fallback samples the centre of the last tile.
+                let row = if name == "Quartz" {
+                    136.5
+                } else {
+                    first_row as f32 + v
+                };
+                assert!((uv[1] * 137.0 - row).abs() < 0.00002);
+            }
+            assert_eq!(mesh.colors, vec![[0.4, 0.3, 0.7, 1.0]; 24]);
+        }
+    }
 
     fn padded(world: &World) -> PaddedChunk {
         let colors = SolidColors::new(&elements());

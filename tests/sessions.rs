@@ -206,6 +206,7 @@ fn session_app() -> App {
     // For the god tools' outline. Gizmos look for skinned meshes too.
     .add_plugins(bevy::gizmos::GizmoPlugin)
     .init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()
+    .add_plugins(bevy::image::ImagePlugin::default())
     .init_asset::<Mesh>()
     .init_asset::<StandardMaterial>()
     // egui itself needs a renderer. Nothing here is drawn, so egui never wants input.

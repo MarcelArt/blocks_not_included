@@ -1,4 +1,4 @@
-//! Drawing the world: every Chunk in [`WorldView`] has its solid Cells drawn as flat-coloured
+//! Drawing the world: every Chunk in [`WorldView`] has its solid Cells drawn as textured
 //! cubes, its liquids as translucent volumes, and its tinted gases as a faint haze, remeshed off
 //! the main thread whenever they change. [`ScenePlugin`] adds the sky and the sun.
 //!
@@ -67,7 +67,7 @@ impl Plugin for ChunkMeshPlugin {
 /// Which of a Chunk's meshes an entity draws. Each has a material of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChunkLayer {
-    /// Opaque, flat-coloured cubes.
+    /// Opaque, textured cubes.
     Solid,
     /// Translucent volumes, whose tops show how full each Cell is.
     Liquid,
@@ -111,10 +111,23 @@ struct ChunkMeshes {
 fn set_up_chunk_meshes(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<AssetServer>,
     elements: Res<Elements>,
 ) {
     let solid = StandardMaterial {
         base_color: Color::WHITE,
+        base_color_texture: Some(
+            assets
+                .load_builder()
+                .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
+                    use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+                    settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        ..ImageSamplerDescriptor::nearest()
+                    });
+                })
+                .load("textures/solids.png"),
+        ),
         // Rock and soil: matte, with no highlights.
         perceptual_roughness: 1.0,
         reflectance: 0.1,
